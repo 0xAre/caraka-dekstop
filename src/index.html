@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CARAKA Desktop — Secure Mesh Communication</title>
+  <meta name="description" content="Platform komunikasi mesh offline terdesentralisasi berbasis Lightweight Cryptography (Ascon NIST SP 800-232)" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <link rel="stylesheet" href="styles/main.css?v=3" />
+</head>
+<body>
+  <!-- Loading Overlay -->
+  <div id="loading-overlay" class="loading-overlay">
+    <div class="loading-content">
+      <div class="loading-logo">
+        <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+          <circle cx="32" cy="32" r="28" stroke="url(#grad1)" stroke-width="2.5"/>
+          <circle cx="32" cy="20" r="6" fill="url(#grad1)"/>
+          <circle cx="16" cy="44" r="6" fill="url(#grad2)"/>
+          <circle cx="48" cy="44" r="6" fill="url(#grad2)"/>
+          <line x1="32" y1="26" x2="16" y2="44" stroke="url(#grad1)" stroke-width="1.5" stroke-dasharray="3,2"/>
+          <line x1="32" y1="26" x2="48" y2="44" stroke="url(#grad1)" stroke-width="1.5" stroke-dasharray="3,2"/>
+          <line x1="16" y1="44" x2="48" y2="44" stroke="url(#grad2)" stroke-width="1.5" stroke-dasharray="3,2"/>
+          <defs>
+            <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" style="stop-color:#6366f1"/>
+              <stop offset="100%" style="stop-color:#8b5cf6"/>
+            </linearGradient>
+            <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" style="stop-color:#8b5cf6"/>
+              <stop offset="100%" style="stop-color:#a78bfa"/>
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+      <h2 class="loading-title">CARAKA Desktop</h2>
+      <p class="loading-subtitle">Menginisialisasi node kriptografi...</p>
+      <div class="loading-bar"><div class="loading-bar-fill"></div></div>
+    </div>
+  </div>
+
+  <!-- Main App -->
+  <div id="app" class="app hidden">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <!-- Node Identity Header -->
+      <div class="sidebar-header">
+        <div class="node-identity">
+          <div class="node-avatar" id="my-avatar">?</div>
+          <div class="node-info">
+            <div class="node-name" id="my-display-name">Memuat...</div>
+            <div class="node-fingerprint" id="my-fingerprint" title="Fingerprint untuk verifikasi identitas">
+              <span class="fp-icon">🔑</span>
+              <span id="fp-value">--------</span>
+            </div>
+          </div>
+          <button class="icon-btn" id="settings-btn" title="Pengaturan">⚙</button>
+        </div>
+
+        <!-- Network Status Bar -->
+        <div class="network-status">
+          <div class="status-indicator" id="network-indicator">
+            <div class="status-dot" id="status-dot"></div>
+            <span id="status-text">Menghubungkan...</span>
+          </div>
+          <div class="peer-count">
+            <span id="connected-count">0</span> peer terhubung
+          </div>
+        </div>
+      </div>
+
+      <!-- Peers List -->
+      <div class="sidebar-section">
+        <div class="section-header">
+          <span>PEER JARINGAN</span>
+          <button class="icon-btn small" id="add-peer-btn" title="Tambah peer manual">+</button>
+        </div>
+        <div id="peers-list" class="peers-list">
+          <div class="empty-state small">
+            <span>Mencari peer di jaringan...</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- My Node ID (for sharing) -->
+      <div class="sidebar-footer">
+        <div class="my-node-id-section">
+          <div class="section-label">NODE ID SAYA</div>
+          <div class="node-id-display" id="my-node-id-short">...</div>
+          <button class="copy-btn" id="copy-node-id-btn" title="Salin Node ID">
+            📋 Salin
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Chat Area -->
+    <main class="main-content">
+
+      <!-- No Peer Selected State -->
+      <div id="no-chat-state" class="no-chat-state">
+        <div class="no-chat-content">
+          <div class="mesh-visualization">
+            <svg width="200" height="160" viewBox="0 0 200 160">
+              <defs>
+                <radialGradient id="nodeGrad" cx="50%" cy="50%" r="50%">
+                  <stop offset="0%" style="stop-color:#6366f1;stop-opacity:0.8"/>
+                  <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:0.3"/>
+                </radialGradient>
+              </defs>
+              <!-- Connections -->
+              <line x1="100" y1="40" x2="40" y2="120" stroke="#6366f1" stroke-width="1" stroke-dasharray="4,3" opacity="0.5" class="anim-pulse-line"/>
+              <line x1="100" y1="40" x2="160" y2="120" stroke="#6366f1" stroke-width="1" stroke-dasharray="4,3" opacity="0.5" class="anim-pulse-line"/>
+              <line x1="40" y1="120" x2="160" y2="120" stroke="#8b5cf6" stroke-width="1" stroke-dasharray="4,3" opacity="0.4" class="anim-pulse-line"/>
+              <!-- Nodes -->
+              <circle cx="100" cy="40" r="14" fill="url(#nodeGrad)" stroke="#6366f1" stroke-width="1.5"/>
+              <text x="100" y="45" text-anchor="middle" fill="#fff" font-size="12" font-family="Inter">A</text>
+              <circle cx="40" cy="120" r="14" fill="url(#nodeGrad)" stroke="#8b5cf6" stroke-width="1.5" opacity="0.7"/>
+              <text x="40" y="125" text-anchor="middle" fill="#fff" font-size="12" font-family="Inter">B</text>
+              <circle cx="160" cy="120" r="14" fill="url(#nodeGrad)" stroke="#8b5cf6" stroke-width="1.5" opacity="0.7"/>
+              <text x="160" y="125" text-anchor="middle" fill="#fff" font-size="12" font-family="Inter">C</text>
+              <!-- Encryption indicator -->
+              <text x="100" y="90" text-anchor="middle" fill="#a78bfa" font-size="10" font-family="JetBrains Mono" opacity="0.6">Ascon-AEAD128</text>
+            </svg>
+          </div>
+          <h2>Selamat Datang di CARAKA</h2>
+          <p>Pilih peer dari daftar kiri untuk memulai komunikasi terenkripsi.<br/>
+             Atau tambah peer manual dengan memasukkan IP address.</p>
+          <div class="crypto-badge">
+            <span>🔒</span>
+            <span>E2EE via Ascon-AEAD128 + X25519 ECDH</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Chat View -->
+      <div id="chat-view" class="chat-view hidden">
+
+        <!-- Chat Header -->
+        <div class="chat-header">
+          <div class="chat-peer-info">
+            <div class="peer-avatar" id="chat-peer-avatar">?</div>
+            <div class="chat-peer-details">
+              <div class="chat-peer-name" id="chat-peer-name">-</div>
+              <div class="chat-peer-status">
+                <span class="peer-status-dot" id="chat-peer-status-dot"></span>
+                <span id="chat-peer-status-text">-</span>
+                <span class="sep">•</span>
+                <span class="peer-fp" id="chat-peer-fp">🔑 --------</span>
+              </div>
+            </div>
+          </div>
+          <div class="chat-header-actions">
+            <div class="encryption-badge" title="End-to-End Encrypted dengan Ascon-AEAD128">
+              🔒 E2EE Ascon
+            </div>
+          </div>
+        </div>
+
+        <!-- Messages Area -->
+        <div class="messages-area" id="messages-area">
+          <div class="messages-scroll" id="messages-scroll">
+            <!-- Messages akan diisi oleh JavaScript -->
+          </div>
+        </div>
+
+        <!-- Message Input -->
+        <div class="message-input-bar">
+          <div class="input-wrapper">
+            <textarea
+              id="message-input"
+              class="message-textarea"
+              placeholder="Ketik pesan terenkripsi... (Enter untuk kirim)"
+              rows="1"
+              maxlength="4096"
+            ></textarea>
+            <div class="input-actions">
+              <span class="char-count" id="char-count">0/4096</span>
+              <button class="send-btn" id="send-btn" disabled>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="22" y1="2" x2="11" y2="13"/>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="input-info">
+            <span>🔒 Dienkripsi dengan Ascon-AEAD128 sebelum dikirim</span>
+            <span id="relay-info"></span>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Add Peer Modal -->
+  <div id="add-peer-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Tambah Peer Manual</h3>
+        <button class="icon-btn" id="close-modal-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="peer-ip-input">IP Address Peer</label>
+          <input type="text" id="peer-ip-input" placeholder="192.168.1.x" class="form-input" />
+        </div>
+        <div class="form-group">
+          <label for="peer-port-input">TCP Port (default: 7771)</label>
+          <input type="number" id="peer-port-input" placeholder="7771" value="7771" class="form-input" />
+        </div>
+        <div class="modal-hint">
+          💡 Peer akan ditemukan otomatis via UDP broadcast jika berada di LAN yang sama.
+          Tambah manual jika UDP diblokir oleh firewall.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="cancel-modal-btn">Batal</button>
+        <button class="btn-primary" id="confirm-add-peer-btn">Hubungkan</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>⚙ Pengaturan Node</h3>
+        <button class="icon-btn" id="close-settings-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="display-name-input">Nama Tampilan</label>
+          <input type="text" id="display-name-input" placeholder="Nama kamu di jaringan" class="form-input" maxlength="50" />
+        </div>
+        <div class="node-info-panel">
+          <div class="info-row">
+            <span class="info-label">Node ID Lengkap</span>
+            <span class="info-value mono" id="settings-full-node-id">-</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Fingerprint</span>
+            <span class="info-value mono" id="settings-fingerprint">-</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">TCP Port</span>
+            <span class="info-value mono">7771</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Discovery Port</span>
+            <span class="info-value mono">7770 (UDP)</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Algoritma Enkripsi</span>
+            <span class="info-value">Ascon-AEAD128 (NIST SP 800-232)</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Key Exchange</span>
+            <span class="info-value">X25519 ECDH</span>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="cancel-settings-btn">Tutup</button>
+        <button class="btn-primary" id="save-settings-btn">Simpan</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notification Toast -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="main.js?v=3"></script>
+</body>
+</html>

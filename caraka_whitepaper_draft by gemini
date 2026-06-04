@@ -1,0 +1,86 @@
+# Draft Whitepaper: CARAKA Desktop
+
+**Secure Offline Mesh Communication Powered by Lightweight Cryptography**
+
+---
+
+## Abstrak
+
+Komunikasi digital yang aman dan andal sangat krusial, terutama pada situasi di mana infrastruktur internet pusat tidak tersedia (bencana alam, wilayah terpencil, atau area dengan sensor jaringan). Pendekatan saat ini untuk komunikasi desentralisasi dan jaringan *mesh* (seperti Briar, Berty, dan Meshtastic) mengandalkan algoritma kriptografi konvensional (seperti AES-GCM, RSA, dan Ed25519) yang membawa beban (*overhead*) signifikan pada metadata *routing* dan kapasitas komunikasi *multi-hop*. 
+
+Makalah ini (Whitepaper) mempresentasikan rancangan arsitektur **CARAKA Desktop**, sebuah platform komunikasi *mesh peer-to-peer* (P2P) luring (offline) yang memecahkan masalah keseimbangan antara overhead jaringan dan privasi. CARAKA mengintegrasikan pemenang standar *Lightweight Cryptography* (LWC) dari NIST, yaitu **ASCON**, ke dalam arsitektur protokol *routing*-nya. Pendekatan ini mendemonstrasikan bagaimana LWC dapat memfasilitasi autentikasi per-hop yang efisien dan menyembunyikan metadata (*onion-routing* ringan) tanpa membebani kapasitas transmisi jaringan desentralisasi, menghadirkan *novelty* kuat di bidang *Security Engineering* dan Sistem Terdistribusi.
+
+---
+
+## 1. Pendahuluan
+
+### 1.1 Visi dan Latar Belakang
+CARAKA Desktop dirancang dengan visi: **Membangun sistem komunikasi mesh P2P yang dapat beroperasi tanpa server pusat atau koneksi internet, dengan keamanan kelas wahid yang tidak mengorbankan skalabilitas jaringan.** 
+
+Sebagai proyek dalam ranah Implementasi Kriptografi, CARAKA bertujuan untuk menjadi *testbed* (lingkungan pengujian) akademis bagi adopsi standar *Lightweight Cryptography* (NIST LWC) dalam topologi jaringan desentralisasi heterogen, di mana node tingkat *desktop* dapat berinteraksi dengan node berdaya rendah (IoT/LoRa) di masa depan.
+
+### 1.2 Rumusan Masalah
+Dalam jaringan *mesh* nirkabel *multi-hop*, paket data harus diteruskan dari satu node ke node lain. Protokol keamanan standar memaksa *developer* untuk memilih satu dari dua hal:
+1.  **Membocorkan Metadata:** Mengirimkan *header routing* dalam bentuk *plaintext* agar *overhead* paket kecil, yang membuka celah bagi analisis *traffic* dan penyadapan jaringan.
+2.  **Overhead Enkripsi Tinggi:** Menyertakan tanda tangan digital *public-key* standar (misalnya Ed25519 yang memakan 64 bytes) pada setiap paket per-hop, yang menguras *bandwidth* radio dan menyebabkan *broadcast storm*.
+
+---
+
+## 2. Tinjauan Pustaka & Research Gap
+
+Analisis terhadap sistem *state-of-the-art* saat ini:
+*   **Briar:** Menggunakan arsitektur jaringan *store-and-forward* via *Bluetooth/Wi-Fi*. Memberikan anonimitas via Tor jika terhubung ke internet, namun *routing offline*-nya terbatas pada pergerakan sosial secara fisik (kontak terpercaya) dan lambat dalam mendiseminasikan data antar-hop panjang.
+*   **Meshtastic (LoRa):** Unggul dalam jangkauan tanpa kabel, namun karena limitasi ukuran paket 256 bytes, metadata (sumber, tujuan, *counter*) dikirim tanpa enkripsi.
+*   **Berty:** Membangun protokol P2P (*Wesh/IPFS*) yang sangat kuat berbasis *X25519* dan *Ed25519*. Sayangnya, algoritma konvensional ini kurang optimal dalam hal konsumsi memori dan ukuran transfer bagi perangkat komputasi atau *bandwidth* rendah.
+
+**Research Gap:** Belum ada protokol aplikasi pesan desentralisasi luring (*offline messenger*) *open-source* yang mengeksplorasi penggunaan *Lightweight Cryptography* (seperti ASCON) secara spesifik untuk memecahkan masalah "Autentikasi Multi-hop Beban Rendah" (Low-overhead multi-hop authentication) dalam jaringan P2P *mesh*.
+
+---
+
+## 3. Arsitektur yang Diusulkan
+
+### 3.1 Lightweight Cryptography Stack (ASCON)
+Setelah membandingkan algoritma finalis NIST LWC (TinyJambu, GIFT-COFB, Grain-128AEAD), CARAKA memilih **ASCON**:
+*   **Core Cipher:** ASCON-AEAD128 akan digunakan untuk *End-to-End Encryption* (E2EE) data *payload*.
+*   **Multi-hop MAC:** Autentikasi integritas data per-hop dalam *mesh routing* menggunakan **ASCON-MAC** (berbasis ASCON-XOF). 
+*   **Key Exchange:** Dikarenakan NIST LWC belum mencakup kriptografi asimetris (*public-key*), mekanisme pembentukan kunci *secret* bersama tetap mengadopsi protokol kurva eliptik modern yang efisien: **X25519** (Elliptic-Curve Diffie-Hellman).
+
+### 3.2 Network & Distributed Systems Architecture
+CARAKA Desktop dibangun di atas *stack* modern menggunakan **Rust** dan ekosistem *networking* seperti **libp2p** untuk memastikan konkurensi memori yang aman dan performa maksimal.
+1.  **Peer Discovery:** Implementasi sistem mDNS untuk mencari node lokal (Wi-Fi/LAN) dan protokol BLE (Bluetooth Low Energy) *broadcasting* jika *hardware* mendukung.
+2.  **Epidemic Routing (Controlled Flooding):** Mekanisme propagasi pesan memanfaatkan sistem *Gossip/Epidemic* dengan optimasi:
+    *   **Time-To-Live (TTL):** Batas maksimum hop.
+    *   **Message Cache History:** Setiap node mengingat *Hash* dari pesan yang baru dilewati, mencegah *loop* jaringan tak terhingga.
+3.  **Trust-Based Store-and-Forward:** Pesan yang dienkripsi dapat disimpan (*cached*) oleh node perantara. Node akan meneruskan data saat terhubung kembali dengan bagian jaringan lain. Protokol akan memprioritaskan diseminasi data ke node dengan skor reputasi (*trust score*) lokal yang tinggi untuk mitigasi Sybil.
+
+---
+
+## 4. Model Ancaman (Threat Model) dan Mitigasi
+
+Model keamanan CARAKA dirancang untuk menahan ancaman dari *Adversary* yang dapat menyadap seluruh lalu lintas nirkabel dan menyusup ke sebagian *node relay*.
+
+1.  **Eavesdropping (Penyadapan):** Serangan pasif dicegah secara absolut melalui enkripsi berlapis. Konten pesan dilindungi ASCON-AEAD E2EE.
+2.  **Traffic Analysis (Analisis Metadata):** *Header routing* dienkripsi secara inkremental menggunakan kunci saluran (*channel-key*) ASCON-MAC, memastikan *Adversary* sulit membedakan sumber awal pesan (konsep *Onion-routing* adaptasi LWC).
+3.  **Replay Attacks:** Musuh tidak dapat memutar ulang (replay) paket usang karena kombinasi unik dari *Session-ID* temporer dan algoritma asimetrik rotasi (ratcheting) *Counter*.
+4.  **Malicious Relay (Node Perantara Jahat):** Karena pesan E2EE ditandatangani dan dienkripsi sebelum dikirim, modifikasi paket sekecil apapun (bit-flipping) oleh node jahat akan merusak validasi ASCON-AEAD *tag*, sehingga node jujur berikutnya akan membuang (drop) pesan tersebut.
+
+---
+
+## 5. Metodologi Evaluasi
+
+Untuk membuktikan nilai akademis sistem yang diusulkan, CARAKA akan menjalani serangkaian *benchmarking* teknis:
+1.  **Micro-Benchmark:** Mengukur utilisasi *CPU cycles/byte* dan profil *Memory RAM* (Peak Usage) untuk proses *Key Exchange*, Enkripsi, dan Dekripsi pesan tunggal. (Perbandingan ASCON vs standar AES-GCM di mesin Desktop Rust).
+2.  **Macro-Benchmark:** Menguji kinerja arsitektur jaringan *mesh*:
+    *   **Overhead Ratio:** Perbandingan persentase ukuran payload efektif vs total paket jaringan akibat tambahan MAC LWC dan metadata.
+    *   **Multi-hop Latency Analysis:** Mengukur pertumbuhan *Delay* eksponensial di simulasi lingkungan uji *mesh* dengan kedalaman jaringan 2, 4, hingga 6 Hop.
+
+---
+
+## 6. Kesimpulan dan Kontribusi
+
+**CARAKA Desktop** mengajukan sebuah rancangan inovatif pada batas persimpangan antara Kriptografi Ringan dan Sistem Jaringan Desentralisasi Terdistribusi. Proyek ini tidak hanya berpotensi menghasilkan sarana komunikasi yang sangat andal pada situasi genting, namun secara teknis memberikan kontribusi riset berupa protokol implementasi ASCON dalam lingkungan *multi-hop*, yang menyelesaikan kebuntuan antara *routing overhead* konvensional dengan kebutuhan perlindungan privasi absolut.
+
+Melalui pengembangan CARAKA, standar masa depan sistem pengiriman pesan *offline* berkinerja tinggi mulai dirumuskan.
+
+---
+*Draft dibuat untuk mata kuliah Implementasi Kriptografi.*

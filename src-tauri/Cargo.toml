@@ -1,0 +1,58 @@
+[package]
+name = "caraka-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Secure Offline Mesh Communication Powered by Lightweight Cryptography"
+authors = ["CARAKA Team"]
+
+[lib]
+name = "caraka_desktop_lib"
+path = "src/lib.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# ── KRIPTOGRAFI ─────────────────────────────────────────────
+# Ascon-AEAD128: enkripsi E2EE payload (NIST SP 800-232)
+ascon-aead  = { version = "0.4" }
+# X25519: key exchange ECDH untuk identitas node dan DM-Key  
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+# HKDF-SHA256: Key Derivation Function (RFC 5869)
+hkdf        = "0.12"
+sha2        = "0.10"
+# Hex encoding untuk Node ID
+hex         = "0.4"
+# Cryptographically secure random number generator
+rand        = { version = "0.8", features = ["std"] }
+# Automatic zeroing of key material from memory when dropped
+zeroize     = { version = "1", features = ["derive"] }
+
+# ── JARINGAN ────────────────────────────────────────────────
+tokio       = { version = "1", features = ["full"] }
+
+# ── STORAGE ─────────────────────────────────────────────────
+rusqlite    = { version = "0.31", features = ["bundled"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+bincode     = "1"
+
+# ── UTILITIES ───────────────────────────────────────────────
+lru         = "0.12"
+thiserror   = "1"
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow      = "1"
+uuid        = { version = "1", features = ["v4"] }
+
+# ── TAURI ───────────────────────────────────────────────────
+tauri       = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+
+[dev-dependencies]
+criterion   = { version = "0.5", features = ["html_reports"] }
+
+# [[bench]] diaktifkan di Fase 7
+# [[bench]]
+# name    = "crypto_bench"
+# harness = false
