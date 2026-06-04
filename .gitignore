@@ -5,6 +5,14 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
+# Internal Documents (tidak dipublikasikan)
+docs/
+*.docx
+~$*
+caraka_whitepaper_draft*
+caraka_research_report.md
+GEMINI.md
+
 # Tauri & Rust
 src-tauri/target/
 src-tauri/target2/

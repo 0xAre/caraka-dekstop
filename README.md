@@ -200,12 +200,8 @@ CARAKA-DEKSTOP/
 
 ## 📖 Dokumentasi
 
-| Dokumen | Deskripsi |
-|---|---|
-| [Project Proposal](docs/01_PROJECT_PROPOSAL.md) | Latar belakang, tujuan, dan ruang lingkup proyek |
-| [Technical Design](docs/02_TECHNICAL_DESIGN.md) | Spesifikasi protokol CLAMP dan desain sistem |
-| [Development Guide](docs/03_DEVELOPMENT_GUIDE.md) | Panduan setup environment dan kontribusi |
-| [Whitepaper Draft](caraka_whitepaper_draft.md) | Draft makalah akademik lengkap |
+Dokumentasi teknis tersedia di dalam source code masing-masing modul (`src-tauri/src/*.rs`).
+Untuk spesifikasi protokol CLAMP secara lengkap, silakan lihat komentar di [`packet.rs`](src-tauri/src/packet.rs) dan [`routing.rs`](src-tauri/src/routing.rs).
 
 ---
 
