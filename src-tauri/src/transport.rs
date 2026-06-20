@@ -182,37 +182,71 @@ async fn handle_inbound_connection(
 // ─── TCP Client ────────────────────────────────────────────────────────────
 
 /// Hubungi peer secara outbound (inisiator koneksi).
+///
+/// [FIX #6] Cek duplikat sebelumnya menggunakan format "ip:port" sebagai key,
+/// padahal setelah handshake peer_senders menggunakan node_id_hex sebagai key.
+/// Sekarang cek duplikat berdasarkan IP address saja (lebih robust).
+///
+/// Emit event feedback ke frontend:
+///   - "peer_connecting" saat mulai
+///   - "peer_connected" jika berhasil
+///   - "peer_connect_failed" jika gagal atau timeout
 pub async fn connect_to_peer(
     ip: &str,
     port: u16,
+    node_id_hint: Option<&str>,
     app_handle: tauri::AppHandle,
     peer_senders: PeerSenders,
 ) {
     let addr = format!("{}:{}", ip, port);
 
-    // Cek apakah sudah terhubung
+    // [FIX #6] Cek duplikat berdasarkan node_id (jika diketahui dari beacon)
+    // ATAU berdasarkan apakah ada sender dengan IP yang sama
     {
         let senders = peer_senders.lock().await;
+
+        // Jika kita tahu node_id dari beacon, cek apakah sudah connected
+        if let Some(nid) = node_id_hint {
+            if senders.contains_key(nid) {
+                debug!("Sudah terhubung ke node {} — skip connect ke {}", &nid[..8.min(nid.len())], addr);
+                return;
+            }
+        }
+
+        // Fallback: cek apakah ada koneksi dengan IP yang sama
+        // (format key lama sebelum handshake adalah "ip:port")
         if senders.contains_key(&addr) {
-            debug!("Sudah terhubung ke {}", addr);
+            debug!("Sudah ada koneksi ke {} — skip", addr);
             return;
         }
     }
 
     info!("Mencoba connect ke peer: {}", addr);
 
-    match TcpStream::connect(&addr).await {
-        Ok(mut stream) => {
+    // Emit event "connecting" ke frontend sebelum mencoba
+    app_handle.emit("peer_connecting", serde_json::json!({
+        "ip": ip,
+        "port": port,
+        "nodeId": node_id_hint.unwrap_or(""),
+    })).ok();
+
+    // Connect dengan timeout 5 detik
+    let connect_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        TcpStream::connect(&addr),
+    ).await;
+
+    match connect_result {
+        Ok(Ok(mut stream)) => {
             // Kirim Hello dulu
             {
                 use crate::state::AppState;
                 if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
-                    if let Ok(state) = state_arc.try_lock() {
-                        if let Ok(node_bytes) = hex::decode(&state.node_id_hex) {
-                            if let Ok(arr) = node_bytes.try_into() {
-                                let hello = ClampPacket::build_hello(&arr, &state.display_name);
-                                let _ = send_raw_packet(&mut stream, &hello.encode()).await;
-                            }
+                    let state = state_arc.lock().await;  // [FIX #3 style] .await bukan try_lock
+                    if let Ok(node_bytes) = hex::decode(&state.node_id_hex) {
+                        if let Ok(arr) = node_bytes.try_into() {
+                            let hello = ClampPacket::build_hello(&arr, &state.display_name);
+                            let _ = send_raw_packet(&mut stream, &hello.encode()).await;
                         }
                     }
                 }
@@ -231,8 +265,21 @@ pub async fn connect_to_peer(
                 handle_inbound_connection(stream, peer_addr, handle, senders).await;
             });
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             warn!("Gagal connect ke {}: {}", addr, e);
+            app_handle.emit("peer_connect_failed", serde_json::json!({
+                "ip": ip,
+                "port": port,
+                "reason": format!("Koneksi ditolak: {}", e),
+            })).ok();
+        }
+        Err(_) => {
+            warn!("Timeout connect ke {} (>5 detik)", addr);
+            app_handle.emit("peer_connect_failed", serde_json::json!({
+                "ip": ip,
+                "port": port,
+                "reason": "Timeout: peer tidak merespons dalam 5 detik",
+            })).ok();
         }
     }
 }
@@ -313,6 +360,20 @@ async fn process_incoming_packet(
         }
     };
 
+    // ── FITUR 4C: Epidemic Sync Packets ─────────────────────────────────────
+    if pkt.header.packet_type == PacketType::SyncReq {
+        handle_sync_req(&pkt, sender_key, app_handle, peer_senders).await;
+        return;
+    }
+    if pkt.header.packet_type == PacketType::SyncResp {
+        handle_sync_resp(&pkt, app_handle).await;
+        return;
+    }
+    if pkt.header.packet_type == PacketType::SyncData {
+        handle_sync_data(&pkt, app_handle).await;
+        return;
+    }
+
     // Hello packets — langsung proses (tidak melalui router)
     if pkt.header.packet_type == PacketType::Hello {
         let payload = serde_json::from_slice::<serde_json::Value>(&pkt.ciphertext)
@@ -325,6 +386,62 @@ async fn process_incoming_packet(
 
         // Simpan peer ke database
         save_peer_from_hello(node_id, display_name, sender_key, app_handle).await;
+        return;
+    }
+
+    // Broadcast packets — deliver ke app DAN relay, tanpa E2EE decrypt
+    if pkt.header.packet_type == crate::packet::PacketType::Broadcast {
+        // Cek duplikat via router packet cache
+        let is_duplicate = {
+            use crate::state::AppState;
+            if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
+                if let Ok(state) = state_arc.try_lock() {
+                    if let Ok(router) = state.router.try_lock() {
+                        router.is_duplicate(&pkt.header.packet_id)
+                    } else { false }
+                } else { false }
+            } else { false }
+        };
+
+        if is_duplicate {
+            debug!("Duplicate broadcast packet — di-drop");
+            return;
+        }
+
+        // Register ke cache agar tidak diproses ulang
+        {
+            use crate::state::AppState;
+            if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
+                if let Ok(state) = state_arc.try_lock() {
+                    if let Ok(mut router) = state.router.try_lock() {
+                        router.register_broadcast(&pkt.header.packet_id);
+                    }
+                }
+            }
+        }
+
+        // Parse payload (plaintext JSON)
+        if let Ok(payload) = serde_json::from_slice::<crate::packet::BroadcastPayload>(&pkt.ciphertext) {
+            // Kirim ke frontend
+            app_handle.emit("broadcast_received", serde_json::json!({
+                "senderId":   payload.sender_id,
+                "senderName": payload.sender_name,
+                "text":       payload.text,
+                "timestamp":  payload.timestamp,
+                "messageId":  payload.message_id,
+                "hopCount":   pkt.hop_auth.hop_counter,
+            })).ok();
+
+            // Relay ke peer lain jika TTL masih tersisa
+            if pkt.header.ttl > 0 {
+                let mut relay_pkt = pkt.clone();
+                relay_pkt.header.ttl -= 1;
+                relay_pkt.hop_auth.hop_counter += 1;
+                relay_packet(&relay_pkt, sender_key, peer_senders).await;
+            }
+        } else {
+            debug!("Gagal parse BroadcastPayload dari packet");
+        }
         return;
     }
 
@@ -430,6 +547,118 @@ pub async fn broadcast_packet(
     }
 
     info!("Paket di-broadcast ke {} peer", senders.len());
+}
+
+// ─── FITUR 4C: Epidemic Sync Handlers ─────────────────────────────────────
+
+/// Proses SyncReq dari peer: kirim kembali fingerprint vector semua pesan yang kita punya.
+async fn handle_sync_req(
+    _pkt: &ClampPacket,
+    sender_key: &str,
+    app_handle: &tauri::AppHandle,
+    peer_senders: &PeerSenders,
+) {
+    use crate::state::AppState;
+
+    // Kumpulkan packet_id semua pesan yang tersimpan di DB
+    let msg_fingerprints: Vec<String> = {
+        if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
+            if let Ok(state) = state_arc.try_lock() {
+                if let Ok(db) = state.db_conn.try_lock() {
+                    crate::store::get_all_message_ids(&db).unwrap_or_default()
+                } else { vec![] }
+            } else { vec![] }
+        } else { vec![] }
+    };
+
+    // Buat SyncResp packet dengan fingerprint list sebagai payload JSON
+    let my_node_id_bytes: [u8; 32] = {
+        if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
+            if let Ok(state) = state_arc.try_lock() {
+                state.my_node_id.0
+            } else { [0u8; 32] }
+        } else { [0u8; 32] }
+    };
+
+    let payload = serde_json::json!({ "fingerprints": msg_fingerprints }).to_string();
+    let pkt_id = ClampPacket::generate_packet_id(&my_node_id_bytes);
+    let resp_pkt = ClampPacket {
+        header: crate::packet::ClampHeader {
+            magic: crate::packet::MAGIC,
+            version: crate::packet::PROTOCOL_VERSION,
+            packet_type: PacketType::SyncResp,
+            ttl: 1, // Sync tidak perlu di-relay
+            packet_id: pkt_id,
+        },
+        hop_auth: crate::packet::HopAuth { hop_counter: 0, mac_tag: [0u8; 16] },
+        nonce: [0u8; 16],
+        ciphertext: payload.into_bytes(),
+        aead_tag: [0u8; 16],
+    };
+
+    // Kirim hanya ke peer yang meminta
+    let senders = peer_senders.lock().await;
+    if let Some(tx) = senders.get(sender_key) {
+        let _ = tx.try_send(resp_pkt.encode());
+    }
+}
+
+/// Proses SyncResp: terima fingerprint list dari peer, minta data yang belum kita punya.
+async fn handle_sync_resp(pkt: &ClampPacket, app_handle: &tauri::AppHandle) {
+    use crate::state::AppState;
+
+    let payload: serde_json::Value = match serde_json::from_slice(&pkt.ciphertext) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let peer_fingerprints: Vec<String> = payload["fingerprints"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    // Cari fingerprints yang tidak ada di DB kita
+    let missing: Vec<String> = {
+        if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
+            if let Ok(state) = state_arc.try_lock() {
+                if let Ok(db) = state.db_conn.try_lock() {
+                    let ours: std::collections::HashSet<String> =
+                        crate::store::get_all_message_ids(&db).unwrap_or_default().into_iter().collect();
+                    peer_fingerprints.into_iter().filter(|id| !ours.contains(id)).collect()
+                } else { vec![] }
+            } else { vec![] }
+        } else { vec![] }
+    };
+
+    if missing.is_empty() {
+        return;
+    }
+
+    // Emit event ke frontend agar bisa minta SyncData dari peer
+    app_handle.emit("sync_missing_detected", serde_json::json!({
+        "missingIds": missing,
+    })).ok();
+}
+
+/// Proses SyncData: terima pesan yang diminta, simpan ke DB.
+async fn handle_sync_data(pkt: &ClampPacket, app_handle: &tauri::AppHandle) {
+    use crate::state::AppState;
+    use crate::store::StoredMessage;
+
+    let msg: StoredMessage = match bincode::deserialize(&pkt.ciphertext) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
+        if let Ok(state) = state_arc.try_lock() {
+            if let Ok(db) = state.db_conn.try_lock() {
+                let _ = crate::store::save_message(&db, &msg);
+            }
+        }
+    }
+
+    debug!("SyncData: pesan {} disimpan dari epidemic sync", &msg.packet_id[..8.min(msg.packet_id.len())]);
 }
 
 /// Helper untuk simpan peer ke database setelah Hello.

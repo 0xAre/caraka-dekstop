@@ -50,6 +50,9 @@ pub enum PacketType {
     Hello = 0x05,
     /// Sync Data — kirim ciphertext yang diminta peer
     SyncData = 0x06,
+    /// Broadcast darurat — pesan publik mesh flooding tanpa E2EE
+    /// Diteruskan ke semua peer sampai TTL habis atau duplicate
+    Broadcast = 0x07,
 }
 
 impl TryFrom<u8> for PacketType {
@@ -62,6 +65,7 @@ impl TryFrom<u8> for PacketType {
             0x04 => Ok(PacketType::SyncResp),
             0x05 => Ok(PacketType::Hello),
             0x06 => Ok(PacketType::SyncData),
+            0x07 => Ok(PacketType::Broadcast),
             other => Err(PacketError::UnknownPacketType(other)),
         }
     }
@@ -127,6 +131,22 @@ pub struct DmInnerPayload {
     pub session_id: String,
     /// Message counter untuk key derivation
     pub msg_counter: u64,
+}
+
+/// Payload untuk Broadcast darurat — TIDAK dienkripsi (plaintext mesh flooding)
+/// Ditujukan untuk semua node di jaringan. Gunakan hanya untuk pesan darurat publik.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BroadcastPayload {
+    /// Node ID pengirim (32 byte hex)
+    pub sender_id: String,
+    /// Nama tampilan pengirim
+    pub sender_name: String,
+    /// Teks pesan darurat
+    pub text: String,
+    /// Unix timestamp (seconds)
+    pub timestamp: u64,
+    /// UUID v4 unik — untuk deduplikasi di sisi penerima
+    pub message_id: String,
 }
 
 // ─── Implementasi ClampPacket ──────────────────────────────────────────────
@@ -277,6 +297,34 @@ impl ClampPacket {
             },
             nonce: [0u8; 16],
             ciphertext: payload.into_bytes(),
+            aead_tag: [0u8; 16],
+        }
+    }
+
+    /// Buat paket Broadcast untuk pesan darurat mesh.
+    ///
+    /// Payload berisi JSON BroadcastPayload tanpa enkripsi.
+    /// TTL = 5 agar bisa menjangkau node jauh tapi tidak menyebabkan broadcast storm.
+    pub fn build_broadcast(
+        my_node_id: &[u8; 32],
+        payload: &BroadcastPayload,
+    ) -> Self {
+        let payload_bytes = serde_json::to_vec(payload).unwrap_or_default();
+        let packet_id = Self::generate_packet_id(my_node_id);
+        ClampPacket {
+            header: ClampHeader {
+                magic: MAGIC,
+                version: PROTOCOL_VERSION,
+                packet_type: PacketType::Broadcast,
+                ttl: 5, // Maks 5 lompatan — cukup untuk jaringan mesh kecil-menengah
+                packet_id,
+            },
+            hop_auth: HopAuth {
+                hop_counter: 0,
+                mac_tag: [0u8; 16], // Broadcast tidak pakai Hop-MAC
+            },
+            nonce: [0u8; 16],
+            ciphertext: payload_bytes,
             aead_tag: [0u8; 16],
         }
     }

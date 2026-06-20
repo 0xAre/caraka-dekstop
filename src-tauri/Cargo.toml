@@ -30,6 +30,8 @@ zeroize     = { version = "1", features = ["derive"] }
 
 # ── JARINGAN ────────────────────────────────────────────────
 tokio       = { version = "1", features = ["full"] }
+# Iterasi network interface untuk subnet broadcast discovery (fix Windows 255.255.255.255)
+get_if_addrs = "0.5"
 
 # ── STORAGE ─────────────────────────────────────────────────
 rusqlite    = { version = "0.31", features = ["bundled"] }
@@ -44,6 +46,12 @@ tracing     = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow      = "1"
 uuid        = { version = "1", features = ["v4"] }
+# BUG #5: Secure storage untuk private key (Windows Credential Manager)
+keyring     = "2"
+# FITUR 4A: QR code generation untuk peer discovery
+qrcode      = "0.14"
+image       = { version = "0.25", default-features = false, features = ["png"] }
+base64      = "0.22"
 
 # ── TAURI ───────────────────────────────────────────────────
 tauri       = { version = "2", features = [] }

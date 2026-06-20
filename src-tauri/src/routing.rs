@@ -4,6 +4,7 @@
 use lru::LruCache;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::time::Instant;
 use crate::crypto::{MacKey, verify_mac, compute_mac};
 use crate::keys::NodePublicKey;
 use crate::packet::ClampPacket;
@@ -26,6 +27,42 @@ pub const TRUST_RATE_LIMIT_DELTA: f32 = -1.0;
 /// Batas trust score (min, max)
 const TRUST_MIN: f32 = 0.0;
 const TRUST_MAX: f32 = 5.0;
+
+// ─── Token Bucket Rate Limiter ──────────────────────────────────────────────
+
+/// Burst capacity: jumlah paket maksimum dalam burst singkat
+const RATE_BURST: u32 = 200;
+/// Refill rate: token baru per detik
+const RATE_PER_SEC: u32 = 100;
+
+/// Token bucket per peer untuk rate limiting.
+struct TokenBucket {
+    tokens: u32,
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    fn new() -> Self {
+        TokenBucket { tokens: RATE_BURST, last_refill: Instant::now() }
+    }
+
+    /// Coba konsumsi 1 token. Return true jika diizinkan, false jika rate limit terlampaui.
+    fn consume(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed_secs = now.duration_since(self.last_refill).as_secs_f32();
+        let new_tokens = (elapsed_secs * RATE_PER_SEC as f32) as u32;
+        if new_tokens > 0 {
+            self.tokens = self.tokens.saturating_add(new_tokens).min(RATE_BURST);
+            self.last_refill = now;
+        }
+        if self.tokens > 0 {
+            self.tokens -= 1;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 // ─── Keputusan Routing ─────────────────────────────────────────────────────
 
@@ -50,6 +87,7 @@ pub enum DropReason {
     TtlExpired,
     TimestampInvalid,
     PeerUntrusted,
+    RateLimitExceeded,
 }
 
 // ─── Router ────────────────────────────────────────────────────────────────
@@ -62,6 +100,8 @@ pub struct Router {
     packet_cache: LruCache<[u8; 8], ()>,
     /// Trust Score setiap peer yang dikenal
     trust_scores: HashMap<NodePublicKey, f32>,
+    /// Token bucket per peer untuk rate limiting (SECURITY 3A)
+    rate_limiters: HashMap<NodePublicKey, TokenBucket>,
     /// Channel MAC Key — untuk validasi Hop-MAC di setiap relay
     /// Default [0u8; 16] — akan dikonfigurasi user di Fase 6
     pub channel_mac_key: MacKey,
@@ -74,6 +114,7 @@ impl Router {
         Router {
             packet_cache: LruCache::new(NonZeroUsize::new(CACHE_SIZE).unwrap()),
             trust_scores: HashMap::new(),
+            rate_limiters: HashMap::new(),
             channel_mac_key: MacKey([0u8; 16]),
             my_node_id,
         }
@@ -98,6 +139,20 @@ impl Router {
         packet: &mut ClampPacket,
         source: &NodePublicKey,
     ) -> RoutingDecision {
+        // 0. Rate limit check — token bucket per peer (SECURITY 3A)
+        let allowed = self.rate_limiters
+            .entry(source.clone())
+            .or_insert_with(TokenBucket::new)
+            .consume();
+        if !allowed {
+            self.update_trust(source, TRUST_RATE_LIMIT_DELTA);
+            tracing::warn!(
+                "Rate limit terlampaui dari peer {:?} — trust diturunkan, paket di-drop",
+                &source.0[0..4]
+            );
+            return RoutingDecision::Drop(DropReason::RateLimitExceeded);
+        }
+
         // 1. Cek trust score
         let trust = self.trust_scores.get(source).copied().unwrap_or(TRUST_INITIAL);
         if trust < TRUST_THRESHOLD {
@@ -157,6 +212,17 @@ impl Router {
         // Tambahkan packet_id ke cache sehingga tidak diproses kembali
         // jika node menerima kembali paket miliknya sendiri
         self.packet_cache.put(packet.header.packet_id, ());
+    }
+
+    /// Cek apakah packet_id sudah pernah diterima (duplicate check untuk Broadcast).
+    pub fn is_duplicate(&self, packet_id: &[u8; 8]) -> bool {
+        self.packet_cache.contains(packet_id)
+    }
+
+    /// Register packet_id Broadcast ke cache tanpa proses routing penuh.
+    /// Digunakan untuk paket Broadcast yang tidak perlu validasi Hop-MAC.
+    pub fn register_broadcast(&mut self, packet_id: &[u8; 8]) {
+        self.packet_cache.put(*packet_id, ());
     }
 
     // ─── MAC Operations ─────────────────────────────────────────────────

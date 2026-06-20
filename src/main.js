@@ -1,98 +1,1622 @@
-// src/main.js
-// CARAKA Desktop — Frontend Application Logic
-// Tauri v2: gunakan window.__TAURI_INTERNALS__ yang selalu tersedia di WebView
+// ═══════════════════════════════════════════════════════════════════════════
+// CARAKA Desktop — Main Frontend Logic (REVAMPED SPA)
+// ═══════════════════════════════════════════════════════════════════════════
+;(function() {
+'use strict';
 
-// ─── Tauri v2 API Wrappers ──────────────────────────────────────────────────
+// ── 1. Tauri IPC Wrappers (lazy-init agar aman di module scope) ────────────
 
-// invoke: panggil Tauri command dari Rust backend
-function invoke(cmd, args) {
-  return window.__TAURI_INTERNALS__.invoke(cmd, args ?? {});
+// Jangan destructure window.__TAURI__ di top-level module!
+// Ini akan crash jika Tauri belum inject global saat module diparsing.
+let _invoke = null;
+let _listen  = null;
+
+async function ipc(command, args = {}) {
+  if (!_invoke) throw new Error('Tauri IPC tidak tersedia');
+  try {
+    return await _invoke(command, args);
+  } catch (err) {
+    console.error(`[IPC] ${command} error:`, err);
+    throw err;
+  }
 }
 
-// listen: subscribe ke event dari Rust backend
-async function listen(event, handler) {
-  const internals = window.__TAURI_INTERNALS__;
+async function on(event, handler) {
+  if (!_listen) return () => {};
+  return _listen(event, handler);
+}
 
-  // Buat callback ID yang Tauri bisa panggil dari Rust
-  const callbackId = internals.transformCallback((eventData) => {
-    handler({ payload: eventData.payload ?? eventData });
+
+// ── 2. Global State ────────────────────────────────────────────────────────
+
+const state = {
+  // Node identity
+  myNodeId:     '',
+  myNodeIdShort:'',
+  myName:       '',
+  myFingerprint:'',
+  myLocalIp:    '',
+
+  // Peers: Map<nodeId, PeerInfo>
+  // PeerInfo: { nodeId, displayName, ip, port, status, fingerprint }
+  // status: 'discovered' | 'connecting' | 'connected' | 'failed' | 'disconnected'
+  peers: new Map(),
+
+  // Active chat
+  activePeerId: null,
+  activeConnTimeout: null,
+
+  // Messages: Map<peerId, Array<MessageObj>>
+  messages: new Map(),
+
+  // Broadcast messages array
+  broadcastMessages: [],
+  broadcastLastSent: 0, // rate limiting
+
+  // Current view/panel
+  currentPanel: 'home',
+
+  // Seen broadcast message IDs (deduplikasi di UI)
+  seenBroadcasts: new Set(),
+};
+
+// ── 3. View Router ─────────────────────────────────────────────────────────
+
+function navigateTo(panelName, peerId = null) {
+  // SECURITY 3D FIX: cancel radar animation saat pindah panel agar tidak leak memory
+  if (panelName !== 'home' && radarAnimFrame) {
+    cancelAnimationFrame(radarAnimFrame);
+    radarAnimFrame = null;
+  }
+
+  // Hide semua panel
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  // Activate target
+  const panel = document.getElementById(`panel-${panelName}`);
+  if (panel) panel.classList.add('active');
+
+  // Nav button states
+  document.querySelectorAll('.nav-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.panel === panelName);
   });
 
-  // Register listener via plugin event IPC
-  const eventId = await internals.invoke('plugin:event|listen', {
-    event:   event,
-    target:  { kind: 'Any' },
-    handler: callbackId,
-  });
+  state.currentPanel = panelName;
 
-  // Return unlisten function
-  return function unlisten() {
-    internals.invoke('plugin:event|unlisten', {
-      event:   event,
-      eventId: eventId,
+  // Panel-specific actions
+  if (panelName === 'home') {
+    renderRadar();
+    // Peer panel: sembunyikan
+    document.getElementById('peer-panel').classList.remove('visible');
+  }
+
+  if (panelName === 'broadcast') {
+    document.getElementById('peer-panel').classList.remove('visible');
+    document.getElementById('broadcast-badge').classList.add('hidden');
+  }
+
+  if (panelName === 'chats') {
+    document.getElementById('peer-panel').classList.add('visible');
+    if (peerId) openChat(peerId);
+  }
+}
+
+// ── 4. Onboarding Flow ─────────────────────────────────────────────────────
+
+let currentSlide = 0;
+const TOTAL_SLIDES = 3;
+
+let _onbListenersAttached = false;
+
+function initOnboarding(nodeData) {
+  // Isi data node di slide 3
+  const nodeIdEl = document.getElementById('onb-node-id');
+  const fpEl = document.getElementById('onb-fingerprint');
+  if (nodeIdEl) nodeIdEl.textContent = nodeData.nodeId ? nodeData.nodeId.substring(0, 16) + '...' : '—';
+  if (fpEl) fpEl.textContent = nodeData.fingerprint || '—';
+
+  // Ambil IP lokal
+  ipc('get_local_ip').then(ip => {
+    const el = document.getElementById('onb-local-ip');
+    if (el) el.textContent = ip || '—';
+  }).catch(() => {});
+
+  // Prefill name input jika sudah ada
+  const nameInput = document.getElementById('name-input');
+  if (nameInput) {
+    if (nodeData.displayName && nodeData.displayName !== 'User') {
+      nameInput.value = nodeData.displayName;
+      updateNamePreview(nodeData.displayName);
+    }
+    nameInput.addEventListener('input', () => {
+      updateNamePreview(nameInput.value);
     });
+  }
+
+  // Attach event listeners hanya sekali
+  if (!_onbListenersAttached) {
+    _onbListenersAttached = true;
+    const nextBtn = document.getElementById('onb-next');
+    const prevBtn = document.getElementById('onb-prev');
+    if (nextBtn) nextBtn.addEventListener('click', handleOnbNext);
+    if (prevBtn) prevBtn.addEventListener('click', handleOnbPrev);
+  }
+
+  // Force slide 0 tanpa animasi transisi
+  const container = document.querySelector('.onboarding-slides');
+  if (container) {
+    container.style.transition = 'none';
+    container.style.transform = 'translateX(0%)';
+    // Re-enable transition setelah paint
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        container.style.transition = '';
+      });
+    });
+  }
+  showSlide(0);
+}
+
+function updateNamePreview(name) {
+  const preview = document.getElementById('name-preview');
+  if (!preview) return;
+  const trimmed = name.trim();
+  preview.textContent = trimmed || '\u2014';
+}
+
+function showSlide(idx) {
+  currentSlide = idx;
+  const container = document.querySelector('.onboarding-slides');
+  if (container) container.style.transform = `translateX(-${idx * 100}%)`;
+
+  // Dots
+  document.querySelectorAll('.step-dot').forEach((dot, i) => {
+    dot.classList.toggle('active', i === idx);
+  });
+
+  // Prev/Next buttons
+  const prevBtn = document.getElementById('onb-prev');
+  const nextBtn = document.getElementById('onb-next');
+  if (prevBtn) prevBtn.style.visibility = idx === 0 ? 'hidden' : 'visible';
+  if (nextBtn) nextBtn.textContent = idx === TOTAL_SLIDES - 1 ? 'Mulai →' : 'Lanjut →';
+}
+
+async function handleOnbNext() {
+  if (currentSlide === 1) {
+    // Validasi nama
+    const name = document.getElementById('name-input').value.trim();
+    if (!name) {
+      showToast('Nama tidak boleh kosong', 'error');
+      document.getElementById('name-input').focus();
+      return;
+    }
+    // Simpan nama
+    try {
+      await ipc('set_display_name', { name });
+      state.myName = name;
+      updateAllNameDisplays();
+    } catch (err) {
+      showToast('Gagal menyimpan nama', 'error');
+      return;
+    }
+  }
+
+  if (currentSlide < TOTAL_SLIDES - 1) {
+    showSlide(currentSlide + 1);
+  } else {
+    // Selesai onboarding
+    finishOnboarding();
+  }
+}
+
+function handleOnbPrev() {
+  if (currentSlide > 0) showSlide(currentSlide - 1);
+}
+
+function finishOnboarding() {
+  const onbView = document.getElementById('view-onboarding');
+  onbView.style.opacity = '0';
+  setTimeout(() => {
+    onbView.classList.remove('active');
+    showAppView();
+  }, 300);
+}
+
+// ── 5. Home / Radar View ───────────────────────────────────────────────────────
+
+let _appStartTime = Date.now();
+
+function setupHomeQuickActions() {
+  const qaBroadcast = document.getElementById('qa-broadcast');
+  const qaChat = document.getElementById('qa-chat');
+  const qaQr = document.getElementById('qa-qr');
+
+  if (qaBroadcast) qaBroadcast.addEventListener('click', () => navigateTo('broadcast'));
+  if (qaChat) qaChat.addEventListener('click', () => navigateTo('chats'));
+  if (qaQr) qaQr.addEventListener('click', () => {
+    const qrBtn = document.getElementById('qr-btn');
+    if (qrBtn) qrBtn.click();
+  });
+}
+
+// ── Notification Feed ──────────────────────────────────────────────────────
+const MAX_NOTIFS = 50;
+
+function pushNotif(type, icon, text) {
+  const feed = document.getElementById('notif-feed');
+  const empty = document.getElementById('notif-empty');
+  if (!feed) return;
+
+  if (empty) empty.remove();
+
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  const item = document.createElement('div');
+  item.className = `notif-item type-${type}`;
+  item.innerHTML = `
+    <div class="notif-icon">${icon}</div>
+    <div class="notif-body">
+      <div class="notif-text">${text}</div>
+      <div class="notif-time">${timeStr}</div>
+    </div>`;
+
+  // Insert at top
+  feed.insertBefore(item, feed.firstChild);
+
+  // Limit
+  const items = feed.querySelectorAll('.notif-item');
+  if (items.length > MAX_NOTIFS) {
+    items[items.length - 1].remove();
+  }
+}
+
+function setupNotifFeed() {
+  const clearBtn = document.getElementById('notif-clear-btn');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      const feed = document.getElementById('notif-feed');
+      if (!feed) return;
+      feed.innerHTML = `<div class="notif-empty" id="notif-empty">Belum ada aktivitas &mdash; sistem sedang memantau jaringan mesh</div>`;
+    });
+  }
+
+  // Notif awal: node siap
+  pushNotif('system', '⚡', `Node <strong>${state.myName || 'kamu'}</strong> aktif di jaringan mesh`);
+  if (state.myLocalIp) {
+    pushNotif('system', '🌐', `IP lokal terdeteksi: <strong>${state.myLocalIp}</strong>`);
+  }
+}
+
+function updateUptime() {
+  const el = document.getElementById('status-uptime');
+  if (!el) return;
+  const elapsed = Math.floor((Date.now() - _appStartTime) / 1000);
+  if (elapsed < 60) {
+    el.textContent = `${elapsed}s`;
+  } else if (elapsed < 3600) {
+    const m = Math.floor(elapsed / 60);
+    const s = elapsed % 60;
+    el.textContent = `${m}m ${s}s`;
+  } else {
+    const h = Math.floor(elapsed / 3600);
+    const m = Math.floor((elapsed % 3600) / 60);
+    el.textContent = `${h}h ${m}m`;
+  }
+}
+
+// Update uptime setiap 10 detik
+setInterval(updateUptime, 10000);
+
+let radarAnimFrame = null;
+let radarAngle = 0;
+
+// Posisi peer di radar — deterministic berdasarkan nodeId hash
+function getPeerRadarPos(nodeId, canvasSize = 320) {
+  const center = canvasSize / 2;
+  const maxR   = center * 0.82;
+
+  // Simple hash dari nodeId untuk posisi konsisten
+  let hash1 = 0, hash2 = 0;
+  for (let i = 0; i < nodeId.length; i++) {
+    const c = nodeId.charCodeAt(i);
+    hash1 = ((hash1 << 5) - hash1 + c) | 0;
+    if (i % 2 === 0) hash2 = ((hash2 << 3) + c) | 0;
+  }
+
+  const angle  = ((Math.abs(hash1) % 360) * Math.PI) / 180;
+  const radius = (Math.abs(hash2) % 60 + 20) / 100 * maxR; // 20%-80% dari maxR
+
+  return {
+    x: center + Math.cos(angle) * radius,
+    y: center + Math.sin(angle) * radius,
+    angle,
+    radius
   };
 }
 
-// ─── State ─────────────────────────────────────────────────────────────────
+function renderRadar() {
+  const canvas = document.getElementById('radar-canvas');
+  if (!canvas) return;
 
-const state = {
-  myNodeId: null,
-  myFingerprint: null,
-  myDisplayName: 'User',
-  selectedPeerId: null,
-  peers: new Map(),    // nodeId -> { nodeId, displayName, isOnline, fingerprint, ip, port }
-  messages: new Map(), // peerId -> [messages]
-};
+  // Use container size for responsive rendering
+  const container = document.getElementById('radar-container');
+  const rect = container.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const displaySize = Math.round(Math.min(rect.width, rect.height));
 
-// ─── UI Helpers ────────────────────────────────────────────────────────────
+  // Set canvas resolution to match display
+  canvas.width = displaySize * dpr;
+  canvas.height = displaySize * dpr;
+  canvas.style.width = displaySize + 'px';
+  canvas.style.height = displaySize + 'px';
 
-function showToast(message, type = 'info', duration = 3000) {
+  const ctx  = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const size = displaySize;
+  const cx   = size / 2;
+  const cy   = size / 2;
+  const maxR = cx * 0.88;
+
+  if (radarAnimFrame) cancelAnimationFrame(radarAnimFrame);
+
+  function draw() {
+    ctx.clearRect(0, 0, size, size);
+
+    // Background
+    ctx.fillStyle = '#070e0e';
+    ctx.fillRect(0, 0, size, size);
+
+    // ── HUD Corner Decorators ──
+    const cornerLen = 24;
+    const cornerOff = 8;
+    ctx.strokeStyle = 'rgba(32, 201, 216, 0.35)';
+    ctx.lineWidth = 1.5;
+    // Top-left
+    ctx.beginPath();
+    ctx.moveTo(cornerOff, cornerOff + cornerLen); ctx.lineTo(cornerOff, cornerOff); ctx.lineTo(cornerOff + cornerLen, cornerOff);
+    ctx.stroke();
+    // Top-right
+    ctx.beginPath();
+    ctx.moveTo(size - cornerOff - cornerLen, cornerOff); ctx.lineTo(size - cornerOff, cornerOff); ctx.lineTo(size - cornerOff, cornerOff + cornerLen);
+    ctx.stroke();
+    // Bottom-left
+    ctx.beginPath();
+    ctx.moveTo(cornerOff, size - cornerOff - cornerLen); ctx.lineTo(cornerOff, size - cornerOff); ctx.lineTo(cornerOff + cornerLen, size - cornerOff);
+    ctx.stroke();
+    // Bottom-right
+    ctx.beginPath();
+    ctx.moveTo(size - cornerOff - cornerLen, size - cornerOff); ctx.lineTo(size - cornerOff, size - cornerOff); ctx.lineTo(size - cornerOff, size - cornerOff - cornerLen);
+    ctx.stroke();
+
+    // ── Lingkaran konsentris + ring labels ──
+    const rings = [
+      { r: 0.25, label: '25%' },
+      { r: 0.50, label: '50%' },
+      { r: 0.75, label: '75%' },
+      { r: 1.00, label: '' },
+    ];
+    rings.forEach(ring => {
+      const radius = maxR * ring.r;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(32, 201, 216, ${0.06 + ring.r * 0.05})`;
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+
+      // Ring label
+      if (ring.label) {
+        ctx.font = '9px "JetBrains Mono", monospace';
+        ctx.fillStyle = 'rgba(32, 201, 216, 0.3)';
+        ctx.textAlign = 'left';
+        ctx.fillText(ring.label, cx + radius + 4, cy - 2);
+      }
+    });
+
+    // ── Cross-hair ──
+    ctx.strokeStyle = 'rgba(32, 201, 216, 0.06)';
+    ctx.lineWidth = 0.5;
+    ctx.setLineDash([4, 6]);
+    ctx.beginPath(); ctx.moveTo(cx, cy - maxR); ctx.lineTo(cx, cy + maxR); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx - maxR, cy); ctx.lineTo(cx + maxR, cy); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // ── Sweep arc (glow trail) ──
+    const sweepLen = Math.PI * 0.5;
+    for (let i = 0; i < 20; i++) {
+      const alpha = (1 - i / 20) * 0.15;
+      const a = radarAngle - (i * sweepLen) / 20;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, maxR, a, a + sweepLen / 20);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(32, 201, 216, ${alpha})`;
+      ctx.fill();
+    }
+
+    // Leading edge (bright line)
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(
+      cx + Math.cos(radarAngle) * maxR,
+      cy + Math.sin(radarAngle) * maxR
+    );
+    ctx.strokeStyle = 'rgba(32, 201, 216, 0.75)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // ── FITUR 4D: Topology Edges (garis dari center ke peer yang terhubung) ──
+    state.peers.forEach((peer, nodeId) => {
+      if (peer.status !== 'connected') return;
+      const pos = getPeerRadarPos(nodeId, size);
+      const gradient = ctx.createLinearGradient(cx, cy, pos.x, pos.y);
+      gradient.addColorStop(0, 'rgba(32, 201, 216, 0.4)');
+      gradient.addColorStop(1, 'rgba(29, 184, 122, 0.1)');
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(pos.x, pos.y);
+      ctx.strokeStyle = gradient;
+      ctx.lineWidth = 0.8;
+      ctx.setLineDash([3, 5]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    });
+
+    // ── Peer nodes ──
+    state.peers.forEach((peer, nodeId) => {
+      const pos = getPeerRadarPos(nodeId, size);
+      const isOnline = peer.status === 'connected';
+      const isConnecting = peer.status === 'connecting';
+
+      const dotR = 7;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, dotR, 0, Math.PI * 2);
+
+      if (isOnline) {
+        ctx.fillStyle = '#1db87a';
+        ctx.shadowColor = '#1db87a';
+        ctx.shadowBlur = 12;
+      } else if (isConnecting) {
+        ctx.fillStyle = '#e5a832';
+        ctx.shadowColor = '#e5a832';
+        ctx.shadowBlur = 10;
+      } else {
+        ctx.fillStyle = 'rgba(74, 158, 191, 0.5)';
+        ctx.shadowBlur = 0;
+      }
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Outer ring for online
+      if (isOnline) {
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, dotR + 4, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(29, 184, 122, 0.3)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // Peer name label
+      const name = peer.displayName || nodeId.substring(0, 6);
+      ctx.font = '10px "Space Grotesk", sans-serif';
+      ctx.fillStyle = isOnline ? 'rgba(238, 244, 244, 0.8)' : 'rgba(125, 168, 168, 0.6)';
+      ctx.textAlign = 'center';
+      ctx.fillText(name, pos.x, pos.y + dotR + 14);
+    });
+
+    // ── Center dot (self) ──
+    ctx.beginPath();
+    ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+    ctx.fillStyle = '#20C9D8';
+    ctx.shadowColor = '#20C9D8';
+    ctx.shadowBlur = 18;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // "YOU" label
+    ctx.font = 'bold 8px "JetBrains Mono", monospace';
+    ctx.fillStyle = 'rgba(32, 201, 216, 0.6)';
+    ctx.textAlign = 'center';
+    ctx.fillText('YOU', cx, cy + 22);
+
+    radarAngle = (radarAngle + 0.02) % (Math.PI * 2);
+    radarAnimFrame = requestAnimationFrame(draw);
+  }
+
+  draw();
+}
+
+
+// Radar hover tooltip
+function setupRadarInteraction() {
+  const canvas  = document.getElementById('radar-canvas');
+  const tooltip = document.getElementById('radar-tooltip');
+
+  canvas.addEventListener('mousemove', (e) => {
+    const rect   = canvas.getBoundingClientRect();
+    const size   = Math.min(rect.width, rect.height);
+    const mx     = e.clientX - rect.left;
+    const my     = e.clientY - rect.top;
+
+    let found = null;
+    state.peers.forEach((peer, nodeId) => {
+      const pos = getPeerRadarPos(nodeId, size);
+      const dist = Math.hypot(mx - pos.x, my - pos.y);
+      if (dist < 16) found = { peer, nodeId, pos };
+    });
+
+    if (found) {
+      tooltip.style.left   = found.pos.x + 'px';
+      tooltip.style.top    = (found.pos.y - 4) + 'px';
+      tooltip.textContent  = found.peer.displayName || `Node ${found.nodeId.substring(0, 8)}`;
+      tooltip.classList.remove('hidden');
+      canvas.style.cursor  = 'pointer';
+    } else {
+      tooltip.classList.add('hidden');
+      canvas.style.cursor  = 'crosshair';
+    }
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    tooltip.classList.add('hidden');
+  });
+
+  // Click pada peer di radar → buka chat
+  canvas.addEventListener('click', (e) => {
+    const rect   = canvas.getBoundingClientRect();
+    const size   = Math.min(rect.width, rect.height);
+    const mx     = e.clientX - rect.left;
+    const my     = e.clientY - rect.top;
+
+    let found = null;
+    state.peers.forEach((peer, nodeId) => {
+      const pos  = getPeerRadarPos(nodeId, size);
+      const dist = Math.hypot(mx - pos.x, my - pos.y);
+      if (dist < 18) found = { peer, nodeId };
+    });
+
+    if (found) {
+      navigateTo('chats', found.nodeId);
+    }
+  });
+}
+
+// ── 6. Broadcast View ──────────────────────────────────────────────────────
+
+function addBroadcastBubble(data, isMine = false) {
+  // Deduplikasi
+  if (state.seenBroadcasts.has(data.messageId)) return;
+  state.seenBroadcasts.add(data.messageId);
+
+  const container = document.getElementById('broadcast-messages');
+
+  // Hapus empty state jika ada
+  const empty = container.querySelector('.empty-state');
+  if (empty) empty.remove();
+
+  const avatarColor = getAvatarColor(data.senderId || data.senderName);
+  const initial     = (data.senderName || '?')[0].toUpperCase();
+  const timeStr     = formatTimestamp(data.timestamp);
+  const hopInfo     = data.hopCount > 0 ? `📡 via ${data.hopCount} hop` : '📡 langsung';
+
+  const bubble = document.createElement('div');
+  bubble.className = `broadcast-bubble ${isMine ? 'mine' : ''}`;
+  bubble.innerHTML = `
+    <div class="broadcast-avatar" style="background:${avatarColor}">${initial}</div>
+    <div class="broadcast-content">
+      <div class="broadcast-sender">${escapeHtml(data.senderName)}</div>
+      <div class="broadcast-text-bubble">${escapeHtml(data.text)}</div>
+      <div class="broadcast-meta">
+        <span>${timeStr}</span>
+        <span class="hop-badge">${hopInfo}</span>
+      </div>
+    </div>
+  `;
+  container.appendChild(bubble);
+  container.scrollTop = container.scrollHeight;
+
+  // Badge di nav jika tidak sedang di broadcast panel
+  if (state.currentPanel !== 'broadcast' && !isMine) {
+    document.getElementById('broadcast-badge').classList.remove('hidden');
+  }
+}
+
+function initBroadcastView() {
+  const textarea = document.getElementById('broadcast-input');
+  const sendBtn  = document.getElementById('broadcast-send-btn');
+  const charCnt  = document.getElementById('broadcast-char-count');
+
+  // FITUR 4E: Emergency type selector
+  let selectedEmergencyType = 'INFO';
+  document.querySelectorAll('.broadcast-type-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.broadcast-type-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      selectedEmergencyType = btn.dataset.type;
+      // Update placeholder based on type
+      const placeholders = {
+        INFO:     'Tulis pesan informasi untuk seluruh jaringan mesh...',
+        EVAC:     'Instruksi evakuasi: lokasi, rute, titik kumpul...',
+        STATUS:   'Laporan status: kondisi, lokasi, jumlah orang...',
+        RESOURCE: 'Permintaan sumber daya: air, makanan, medis, lokasi...',
+      };
+      textarea.placeholder = placeholders[selectedEmergencyType] || placeholders.INFO;
+    });
+  });
+
+  textarea.addEventListener('input', () => {
+    charCnt.textContent = textarea.value.length;
+    sendBtn.disabled    = textarea.value.trim().length === 0;
+  });
+
+  sendBtn.addEventListener('click', async () => {
+    const text = textarea.value.trim();
+    if (!text) return;
+
+    // Rate limiting: 3 detik
+    const now = Date.now();
+    if (now - state.broadcastLastSent < 3000) {
+      showToast('Tunggu beberapa detik sebelum broadcast lagi', 'warning');
+      return;
+    }
+
+    // Prefix pesan dengan tipe darurat
+    const typePrefix = selectedEmergencyType !== 'INFO' ? `[${selectedEmergencyType}] ` : '';
+    const fullText = typePrefix + text;
+
+    // Konfirmasi
+    const typeLabel = { INFO: 'informasi', EVAC: 'evakuasi DARURAT', STATUS: 'status', RESOURCE: 'permintaan sumber daya' }[selectedEmergencyType] || 'darurat';
+    if (!confirm(`Pesan ${typeLabel} ini akan terlihat oleh SEMUA peer di jaringan. Lanjutkan?`)) return;
+
+    sendBtn.disabled = true;
+    sendBtn.textContent = '📡 Mengirim...';
+
+    try {
+      await ipc('send_broadcast', { text: fullText });
+      textarea.value = '';
+      charCnt.textContent = '0';
+      state.broadcastLastSent = Date.now();
+    } catch (err) {
+      showToast('Gagal mengirim broadcast: ' + err, 'error');
+    } finally {
+      setTimeout(() => {
+        sendBtn.disabled    = false;
+        sendBtn.textContent = '📡 Broadcast';
+      }, 3000);
+    }
+  });
+}
+
+// ── 7. Private Chat View ───────────────────────────────────────────────────
+
+function openChat(peerId) {
+  const peer = state.peers.get(peerId);
+  if (!peer) {
+    showToast('Peer tidak ditemukan', 'error');
+    return;
+  }
+
+  state.activePeerId = peerId;
+
+  // Show active-chat, hide no-chat
+  document.getElementById('no-chat-selected').style.display = 'none';
+  const activeChat = document.getElementById('active-chat');
+  activeChat.style.display = 'flex';
+
+  // Update peer list active
+  document.querySelectorAll('.peer-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.peerId === peerId);
+  });
+
+  // Update header
+  const avatarEl = document.getElementById('chat-avatar');
+  avatarEl.style.background = getAvatarColor(peerId);
+  avatarEl.textContent      = (peer.displayName || '?')[0].toUpperCase();
+
+  document.getElementById('chat-peer-name').textContent = peer.displayName || peerId.substring(0, 8);
+  document.getElementById('chat-peer-fp').textContent   = peer.fingerprint
+    ? peer.fingerprint.substring(0, 20) + '...'
+    : peer.nodeId.substring(0, 16) + '...';
+
+  // Update connection badge
+  updateChatConnectionBadge(peerId);
+
+  // BUG #6 FIX: Load history dari DB dulu, baru render
+  loadMessageHistory(peerId).then(() => {
+    // Scroll ke pesan terbaru setelah load
+    const scroll = document.getElementById('messages-scroll');
+    if (scroll) scroll.scrollTop = scroll.scrollHeight;
+  });
+
+  // Render pesan yang sudah ada di state (sementara history di-load)
+  renderMessages(peerId);
+
+  // Send button
+  const sendBtn  = document.getElementById('send-btn');
+  const msgInput = document.getElementById('msg-input');
+  sendBtn.disabled = peer.status !== 'connected';
+
+  // Jika belum connected, coba initiate connection
+  if (peer.status === 'discovered' || peer.status === 'failed' || peer.status === 'disconnected') {
+    initiateConnection(peerId);
+  }
+}
+
+function updateChatConnectionBadge(peerId) {
+  if (state.activePeerId !== peerId) return;
+  const peer = state.peers.get(peerId);
+  if (!peer) return;
+
+  const badge    = document.getElementById('chat-conn-badge');
+  const retryBtn = document.getElementById('retry-conn-btn');
+  const sendBtn  = document.getElementById('send-btn');
+
+  const configs = {
+    connected:    { cls: 'online',      text: '● Online',          retry: false },
+    connecting:   { cls: 'connecting',  text: '⟳ Menghubungkan...', retry: false },
+    discovered:   { cls: 'offline',     text: '○ Ditemukan',       retry: false },
+    failed:       { cls: 'failed',      text: '✕ Gagal',           retry: true  },
+    disconnected: { cls: 'offline',     text: '● Offline',         retry: true  },
+  };
+
+  const cfg = configs[peer.status] || configs.disconnected;
+
+  badge.className  = `conn-badge ${cfg.cls}`;
+  badge.textContent = cfg.text;
+  retryBtn.style.display = cfg.retry ? '' : 'none';
+  sendBtn.disabled = peer.status !== 'connected';
+}
+
+// ── 8. Peer Connection State Machine ──────────────────────────────────────
+
+async function initiateConnection(peerId) {
+  const peer = state.peers.get(peerId);
+  if (!peer) return;
+  if (peer.status === 'connecting' || peer.status === 'connected') return;
+
+  setPeerStatus(peerId, 'connecting');
+
+  // Timeout 7 detik
+  if (state.activeConnTimeout) clearTimeout(state.activeConnTimeout);
+  state.activeConnTimeout = setTimeout(() => {
+    const p = state.peers.get(peerId);
+    if (p && p.status === 'connecting') {
+      setPeerStatus(peerId, 'failed');
+      showToast(`Gagal terhubung ke ${p.displayName}. Pastikan peer aktif.`, 'error');
+    }
+  }, 7000);
+
+  try {
+    await ipc('add_peer_manual', { ip: peer.ip, port: peer.port });
+  } catch (err) {
+    setPeerStatus(peerId, 'failed');
+    showToast('Gagal koneksi: ' + err, 'error');
+  }
+}
+
+function setPeerStatus(peerId, status) {
+  const peer = state.peers.get(peerId);
+  if (!peer) return;
+
+  peer.status = status;
+  state.peers.set(peerId, peer);
+
+  // Update peer item di list
+  const item = document.querySelector(`.peer-item[data-peer-id="${peerId}"]`);
+  if (item) {
+    const dot = item.querySelector('.peer-status-dot');
+    if (dot) {
+      dot.className = `peer-status-dot ${status === 'connected' ? 'online' : status === 'connecting' ? 'connecting' : status === 'failed' ? 'failed' : ''}`;
+    }
+  }
+
+  // Update chat header jika peer ini sedang aktif
+  updateChatConnectionBadge(peerId);
+
+  // Refresh radar
+  // Radar auto-refresh via rAF
+}
+
+// ── 9. Sidebar & Peer List ────────────────────────────────────────────────
+
+function renderPeerList() {
+  const container = document.getElementById('peer-list-scroll');
+  container.innerHTML = '';
+
+  if (state.peers.size === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state-icon">🔍</div>
+        <div class="empty-state-text">Mencari peer...</div>
+        <small>Pastikan peer lain aktif di jaringan yang sama</small>
+      </div>
+    `;
+    return;
+  }
+
+  let onlineCount = 0;
+  state.peers.forEach((peer, nodeId) => {
+    if (peer.status === 'connected') onlineCount++;
+
+    const item = document.createElement('div');
+    item.className = 'peer-item';
+    item.dataset.peerId = nodeId;
+
+    const avatarColor = getAvatarColor(nodeId);
+    const initial     = (peer.displayName || '?')[0].toUpperCase();
+    const statusClass = peer.status === 'connected' ? 'online'
+                      : peer.status === 'connecting' ? 'connecting'
+                      : peer.status === 'failed' ? 'failed' : '';
+
+    item.innerHTML = `
+      <div class="peer-avatar-wrap">
+        <div class="peer-avatar" style="background:${avatarColor}">${initial}</div>
+        <div class="peer-status-dot ${statusClass}"></div>
+      </div>
+      <div class="peer-item-info">
+        <div class="peer-item-name">${escapeHtml(peer.displayName || 'Unknown')}</div>
+        <div class="peer-item-meta">${peer.ip || ''}</div>
+      </div>
+    `;
+
+    item.addEventListener('click', () => {
+      navigateTo('chats', nodeId);
+    });
+
+    container.appendChild(item);
+  });
+
+  // Update counts
+  document.getElementById('peer-count').textContent     = onlineCount;
+  document.getElementById('card-peers-online').textContent = onlineCount;
+  document.getElementById('card-peers-known').textContent  = state.peers.size;
+
+  // Network status
+  const netDot  = document.getElementById('net-status-dot');
+  const netText = document.getElementById('net-status-text');
+  const homeDot = document.getElementById('home-net-dot');
+  const homeText= document.getElementById('home-net-text');
+
+  if (onlineCount > 0) {
+    netDot.className   = 'status-dot online';
+    netText.textContent = `${onlineCount} peer terhubung`;
+    homeDot.className  = 'status-dot online';
+    homeText.textContent = `${onlineCount} online`;
+  } else {
+    netDot.className   = 'status-dot searching';
+    netText.textContent = 'Mencari peer...';
+    homeDot.className  = 'status-dot searching';
+    homeText.textContent = 'Mencari...';
+  }
+}
+
+// ── 10. Toast Notification System ─────────────────────────────────────────
+
+function showToast(message, type = 'info', duration = 4000) {
   const container = document.getElementById('toast-container');
+
+  const icons = { success: '✅', error: '❌', warning: '⚠️', info: '📡' };
+
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
-  toast.textContent = message;
+  toast.innerHTML = `
+    <span class="toast-icon">${icons[type] || icons.info}</span>
+    <span class="toast-text">${escapeHtml(String(message))}</span>
+  `;
+
   container.appendChild(toast);
+
+  // Auto remove
   setTimeout(() => {
-    toast.style.animation = 'toastOut 0.3s ease forwards';
+    toast.style.animation = 'toastOut 0.3s ease both';
     setTimeout(() => toast.remove(), 300);
   }, duration);
 }
 
-function getAvatarColor(str) {
-  const colors = [
-    'linear-gradient(135deg, #6366f1, #8b5cf6)',
-    'linear-gradient(135deg, #ec4899, #8b5cf6)',
-    'linear-gradient(135deg, #14b8a6, #6366f1)',
-    'linear-gradient(135deg, #f59e0b, #ef4444)',
-    'linear-gradient(135deg, #10b981, #14b8a6)',
-    'linear-gradient(135deg, #3b82f6, #6366f1)',
+// ── 11. QR Code Modal ─────────────────────────────────────────────────────
+
+// Minimalist QR encoder menggunakan canvas — menggunakan library qrcode-svg
+// Karena kita pure vanilla, kita buat QR sederhana dengan data URL placeholder
+// Implementasi actual memerlukan qrcode library atau qrcodegen
+
+function generateQR() {
+  const canvas    = document.getElementById('qr-canvas');
+  const ctx       = canvas.getContext('2d');
+  const localIpEl = document.getElementById('qr-local-ip');
+
+  // Set IP
+  localIpEl.textContent = state.myLocalIp || '—';
+
+  // QR data: caraka://nodeId@ip:port
+  const qrData = `caraka://${state.myNodeId}@${state.myLocalIp}:7771`;
+
+  // Render sederhana: tampilkan teks info di canvas sampai library dimuat
+  ctx.fillStyle = 'white';
+  ctx.fillRect(0, 0, 200, 200);
+  ctx.fillStyle = '#070e0e';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'center';
+
+  // Cek apakah qrcode tersedia (dari CDN atau bundled)
+  if (window.QRCode) {
+    try {
+      // Jika library ada, gunakan
+      const qr = new window.QRCode(canvas, {
+        text: qrData,
+        width: 200, height: 200,
+        colorDark: '#070e0e',
+        colorLight: '#ffffff',
+      });
+    } catch {
+      drawFallbackQR(ctx, qrData);
+    }
+  } else {
+    drawFallbackQR(ctx, qrData);
+  }
+}
+
+function drawFallbackQR(ctx, data) {
+  // Fallback: tampilkan info sebagai teks
+  ctx.fillStyle = 'white';
+  ctx.fillRect(0, 0, 200, 200);
+
+  // Border
+  ctx.strokeStyle = '#070e0e';
+  ctx.lineWidth   = 8;
+  ctx.strokeRect(4, 4, 192, 192);
+
+  ctx.fillStyle  = '#070e0e';
+  ctx.font       = 'bold 11px monospace';
+  ctx.textAlign  = 'center';
+  ctx.fillText('CARAKA', 100, 80);
+  ctx.font       = '9px monospace';
+
+  // Potong data panjang ke beberapa baris
+  const lines = data.match(/.{1,22}/g) || [data];
+  lines.forEach((line, i) => {
+    ctx.fillText(line, 100, 100 + i * 14);
+  });
+}
+
+// ── 12. Settings Modal ────────────────────────────────────────────────────
+
+function openSettings() {
+  document.getElementById('settings-name-input').value   = state.myName;
+  document.getElementById('settings-node-id').textContent = state.myNodeId
+    ? state.myNodeId.substring(0, 32) + '...' : '—';
+  document.getElementById('settings-fingerprint').textContent = state.myFingerprint || '—';
+  document.getElementById('settings-local-ip').textContent    = state.myLocalIp || '—';
+
+  document.getElementById('modal-settings').classList.remove('hidden');
+}
+
+async function saveSettings() {
+  const name = document.getElementById('settings-name-input').value.trim();
+  if (!name) {
+    showToast('Nama tidak boleh kosong', 'error');
+    return;
+  }
+
+  try {
+    await ipc('set_display_name', { name });
+    state.myName = name;
+    updateAllNameDisplays();
+    document.getElementById('modal-settings').classList.add('hidden');
+    showToast('Nama berhasil disimpan', 'success');
+  } catch (err) {
+    showToast('Gagal menyimpan: ' + err, 'error');
+  }
+}
+
+// ── 13. Backend Event Listeners ───────────────────────────────────────────
+
+async function setupEventListeners() {
+  // Node siap
+  await on('node_ready', (event) => {
+    console.log('[CARAKA] Node ready:', event.payload);
+  });
+
+  // Emergency Mode events
+  try { await setupEmergencyEventListeners(); } catch(emErr) {
+    console.warn('[CARAKA] Emergency event listeners gagal:', emErr);
+  }
+
+  // Peer ditemukan via UDP discovery
+  await on('peer_discovered', (event) => {
+    const d = event.payload;
+    if (!state.peers.has(d.nodeId)) {
+      state.peers.set(d.nodeId, {
+        nodeId:      d.nodeId,
+        displayName: d.displayName || `Node ${d.nodeId.substring(0, 8)}`,
+        ip:          d.ip,
+        port:        d.port,
+        status:      'discovered',
+        fingerprint: '',
+      });
+    } else {
+      const p = state.peers.get(d.nodeId);
+      p.ip   = d.ip;
+      p.port = d.port;
+      if (d.displayName && d.displayName !== 'Unknown') p.displayName = d.displayName;
+      state.peers.set(d.nodeId, p);
+    }
+    renderPeerList();
+  });
+
+  // Peer mulai connecting
+  await on('peer_connecting', (event) => {
+    const { ip } = event.payload;
+    state.peers.forEach((peer, nodeId) => {
+      if (peer.ip === ip) setPeerStatus(nodeId, 'connecting');
+    });
+  });
+
+  // Peer handshake selesai
+  await on('peer_handshaked', (event) => {
+    const d = event.payload;
+    if (!state.peers.has(d.nodeId)) {
+      state.peers.set(d.nodeId, {
+        nodeId:      d.nodeId,
+        displayName: d.displayName || `Node ${d.nodeId.substring(0, 8)}`,
+        ip:          d.ip,
+        port:        d.port || 7771,
+        status:      'discovered',
+        fingerprint: d.fingerprint || '',
+      });
+    } else {
+      const p = state.peers.get(d.nodeId);
+      if (d.displayName) p.displayName = d.displayName;
+      if (d.fingerprint) p.fingerprint = d.fingerprint;
+      state.peers.set(d.nodeId, p);
+    }
+    renderPeerList();
+  });
+
+  // Peer connected
+  await on('peer_connected', (event) => {
+    const d = event.payload;
+    const nodeId = d.nodeId || findPeerByIp(d.ip);
+    if (state.activeConnTimeout) { clearTimeout(state.activeConnTimeout); state.activeConnTimeout = null; }
+    if (nodeId) {
+      setPeerStatus(nodeId, 'connected');
+      const peer = state.peers.get(nodeId);
+      if (peer) {
+        showToast(`${peer.displayName} terhubung`, 'success');
+        pushNotif('peer', '🟢', `<strong>${peer.displayName}</strong> bergabung ke jaringan mesh`);
+      }
+    }
+    renderPeerList();
+  });
+
+  // Peer connect failed
+  await on('peer_connect_failed', (event) => {
+    const { ip, reason } = event.payload;
+    const nodeId = findPeerByIp(ip);
+    if (state.activeConnTimeout) { clearTimeout(state.activeConnTimeout); state.activeConnTimeout = null; }
+    if (nodeId) {
+      setPeerStatus(nodeId, 'failed');
+      const peer = state.peers.get(nodeId);
+      showToast(`Gagal ke ${peer?.displayName || ip}: ${reason}`, 'error');
+    }
+    renderPeerList();
+  });
+
+  // Peer disconnected
+  await on('peer_disconnected', (event) => {
+    const d = event.payload;
+    const nodeId = d.nodeId || findPeerByIp(d.ip);
+    if (nodeId) {
+      setPeerStatus(nodeId, 'disconnected');
+      const peer = state.peers.get(nodeId);
+      if (peer) {
+        showToast(`${peer.displayName} terputus`, 'warning');
+        pushNotif('warn', '🔴', `<strong>${peer.displayName}</strong> terputus dari jaringan`);
+      }
+    }
+    renderPeerList();
+  });
+
+  // Pesan DM diterima
+  await on('clamp_packet_received', (event) => {
+    handleIncomingPacket(event.payload);
+  });
+
+  // Pesan DM terkirim
+  await on('message_sent', (event) => {
+    const d = event.payload;
+    // BUG #2 FIX: Backend emits recipientId (camelCase), bukan recipientNodeId
+    appendMessage(d.recipientId, {
+      text:      d.text,
+      timestamp: d.timestamp,
+      outgoing:  true,
+    });
+  });
+
+  // Broadcast diterima
+  await on('broadcast_received', (event) => {
+    const d = event.payload;
+    addBroadcastBubble({
+      senderId:   d.senderId,
+      senderName: d.senderName,
+      text:       d.text,
+      timestamp:  d.timestamp,
+      messageId:  d.messageId,
+      hopCount:   d.hopCount || 0,
+    });
+    const shortText = d.text.length > 40 ? d.text.substring(0, 40) + '...' : d.text;
+    pushNotif('warn', '📢', `<strong>${d.senderName || 'Anonim'}</strong>: ${shortText}`);
+  });
+
+  // Broadcast terkirim
+  await on('broadcast_sent', (event) => {
+    const d = event.payload;
+    addBroadcastBubble({
+      senderId:   d.senderId,
+      senderName: d.senderName,
+      text:       d.text,
+      timestamp:  d.timestamp,
+      messageId:  d.messageId,
+      hopCount:   0,
+    }, true);
+  });
+
+  // Error node
+  await on('node_error', (event) => {
+    showToast('Node error: ' + (event.payload?.error || 'Unknown'), 'error', 8000);
+  });
+}
+
+async function handleIncomingPacket(d) {
+  try {
+    // BUG #2 FIX: Gunakan parameter names yang sesuai dengan Rust command signature
+    // Transport emits: packetId, nonce, ciphertext, aeadTag
+    // Rust expects: packet_id (packetId), nonce_hex (nonceHex), ciphertext_hex (ciphertextHex), aead_tag_hex (aeadTagHex)
+    const result = await ipc('try_decrypt_packet', {
+      packetId:     d.packetId,
+      nonceHex:     d.nonce,
+      ciphertextHex: d.ciphertext,
+      aeadTagHex:   d.aeadTag,
+    });
+
+    if (result && result.plaintext) {
+      const senderId = result.senderId || d.packetId;
+      appendMessage(senderId, {
+        text:      result.plaintext,
+        timestamp: result.timestamp || Math.floor(Date.now() / 1000),
+        outgoing:  false,
+      });
+      // Notif pesan masuk
+      const sender = state.peers.get(senderId);
+      const senderName = sender?.displayName || senderId?.substring(0, 8) || 'Unknown';
+      const shortText = result.plaintext.length > 40 ? result.plaintext.substring(0, 40) + '...' : result.plaintext;
+      pushNotif('msg', '💬', `<strong>${senderName}</strong>: ${shortText}`);
+    }
+  } catch (err) {
+    console.warn('[CARAKA] Gagal dekripsi packet:', err);
+  }
+}
+
+// ── 14. App Initialization ────────────────────────────────────────────────
+
+async function initApp() {
+  console.log('[CARAKA] Memulai inisialisasi...');
+  const statusEl = document.getElementById('splash-status');
+
+  // Animated status messages
+  const statusMessages = [
+    'Memuat kriptografi...',
+    'Menginisialisasi node...',
+    'Membuka database...',
+    'Mengaktifkan transport...',
+    'Memulai discovery...',
+    'Node siap!',
   ];
-  let hash = 0;
-  for (const ch of str) hash = (hash << 5) - hash + ch.charCodeAt(0);
-  return colors[Math.abs(hash) % colors.length];
+  let msgIdx = 0;
+  const statusInterval = setInterval(() => {
+    if (statusEl && msgIdx < statusMessages.length - 1) {
+      msgIdx++;
+      statusEl.textContent = statusMessages[msgIdx];
+    } else {
+      clearInterval(statusInterval);
+    }
+  }, 400);
+
+  try {
+    // Setup event listeners (opsional — jika gagal app tetap jalan)
+    try { await setupEventListeners(); } catch(evErr) {
+      console.warn('[CARAKA] Event listeners gagal:', evErr);
+    }
+
+    // Init node
+    const nodeData = await ipc('init_node');
+    console.log('[CARAKA] Node ready:', nodeData.nodeId?.substring(0, 8));
+
+    // Simpan state
+    state.myNodeId      = nodeData.nodeId || '';
+    state.myNodeIdShort = nodeData.nodeId ? nodeData.nodeId.substring(0, 16) + '...' : '';
+    state.myName        = nodeData.displayName || 'User';
+    state.myFingerprint = nodeData.fingerprint || '';
+
+    // Ambil IP lokal
+    try {
+      state.myLocalIp = await ipc('get_local_ip');
+    } catch {
+      state.myLocalIp = 'Tidak diketahui';
+    }
+
+    clearInterval(statusInterval);
+    if (statusEl) statusEl.textContent = 'Node siap!';
+
+    // Load existing peers dari DB
+    try {
+      const peers = await ipc('get_peers');
+      peers.forEach(p => {
+        // Field names sekarang camelCase karena #[serde(rename_all = "camelCase")]
+        const nodeId = p.nodeId || p.node_id;
+        const displayName = p.displayName || p.display_name || nodeId?.substring(0, 8) || '?';
+        const ip = p.ipAddress || p.ip_address || p.ip || '';
+        const port = p.tcpPort || p.tcp_port || 7771;
+
+        if (nodeId) {
+          state.peers.set(nodeId, {
+            nodeId,
+            displayName,
+            ip,
+            port,
+            status: 'disconnected',
+            fingerprint: p.fingerprint || '',
+          });
+        }
+      });
+    } catch (e) {
+      console.warn('[CARAKA] get_peers error:', e);
+    }
+
+
+    // Delay splash sedikit agar animasi terlihat
+    await delay(800);
+
+    // Cek apakah perlu onboarding
+    const needsOnboarding = !nodeData.displayName
+      || nodeData.displayName === 'User'
+      || nodeData.displayName.trim() === '';
+
+    if (needsOnboarding) {
+      showOnboarding(nodeData);
+    } else {
+      showAppView();
+    }
+
+  } catch (err) {
+    clearInterval(statusInterval);
+    console.error('[CARAKA] Gagal init:', err);
+    if (statusEl) statusEl.textContent = 'Error: ' + err;
+    // Tampilkan error di splash dengan warna merah
+    const statusDot = document.querySelector('.splash-status-dot');
+    if (statusDot) { statusDot.style.background = '#d94f4f'; statusDot.style.animation = 'none'; }
+    setTimeout(() => showToast('Gagal memulai node: ' + err, 'error', 10000), 500);
+  }
 }
 
-function getAvatarLetter(name) { return (name || '?').charAt(0).toUpperCase(); }
-
-function formatTime(timestamp) {
-  return new Date(timestamp * 1000).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+function showOnboarding(nodeData) {
+  const splash = document.getElementById('view-splash');
+  if (splash) splash.style.opacity = '0';
+  setTimeout(() => {
+    if (splash) splash.classList.remove('active');
+    const onb = document.getElementById('view-onboarding');
+    if (onb) {
+      onb.style.opacity = '1';
+      onb.classList.add('active');
+    }
+    // Reset slide ke 0 dan inisialisasi
+    currentSlide = 0;
+    initOnboarding(nodeData);
+  }, 300);
 }
 
-function formatDate(timestamp) {
-  const d = new Date(timestamp * 1000);
-  const today = new Date();
-  if (d.toDateString() === today.toDateString()) return 'Hari ini';
-  const yesterday = new Date(today);
-  yesterday.setDate(yesterday.getDate() - 1);
-  if (d.toDateString() === yesterday.toDateString()) return 'Kemarin';
-  return d.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+function showAppView() {
+  const splash = document.getElementById('view-splash');
+  const onb    = document.getElementById('view-onboarding');
+  if (splash) {
+    splash.style.opacity = '0';
+    splash.classList.remove('active');
+  }
+  if (onb) {
+    onb.style.opacity = '0';
+    setTimeout(() => onb.classList.remove('active'), 300);
+  }
+
+  const app = document.getElementById('view-app');
+  app.classList.add('active');
+
+  // Setup UI setelah app tampil
+  updateAllNameDisplays();
+  updateHomeCards();
+  renderPeerList();
+  renderRadar();
+  setupRadarInteraction();
+  initBroadcastView();
+  setupUIInteractions();
+  setupChatInput();
+  setupHomeQuickActions();
+  setupEmergencyMode();
+  updateUptime();
+  setupNotifFeed();
 }
 
-function shortNodeId(nodeId) {
-  if (!nodeId || nodeId.length < 16) return nodeId;
-  return nodeId.slice(0, 8) + '...' + nodeId.slice(-8);
+function updateAllNameDisplays() {
+  const initial = state.myName ? state.myName[0].toUpperCase() : 'C';
+
+  // Avatar button di sidebar
+  const avatarBtn = document.getElementById('my-avatar-btn');
+  if (avatarBtn) avatarBtn.textContent = initial;
+
+  // Home greeting
+  const greetingEl = document.getElementById('home-greeting-name');
+  if (greetingEl) greetingEl.textContent = state.myName || 'Node';
+
+  // My short ID
+  const shortIdEl = document.getElementById('my-short-id');
+  if (shortIdEl) shortIdEl.textContent = state.myNodeIdShort || '—';
 }
+
+function updateHomeCards() {
+  const fpEl  = document.getElementById('card-fingerprint');
+  const ipEl  = document.getElementById('card-local-ip');
+  const qrIpEl = document.getElementById('qr-local-ip');
+
+  if (fpEl)   fpEl.textContent  = state.myFingerprint || '—';
+  if (ipEl)   ipEl.textContent  = state.myLocalIp     || '—';
+  if (qrIpEl) qrIpEl.textContent = state.myLocalIp   || '—';
+}
+
+function setupUIInteractions() {
+  // Nav buttons
+  document.querySelectorAll('.nav-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      navigateTo(btn.dataset.panel);
+    });
+  });
+
+  // My avatar → settings (profile)
+  document.getElementById('my-avatar-btn').addEventListener('click', openSettings);
+
+  // Logout / Reset button
+  const logoutBtn = document.getElementById('logout-btn');
+  if (logoutBtn) {
+    logoutBtn.addEventListener('click', () => {
+      if (confirm('Reset aplikasi dan keluar? Semua data lokal (nama, riwayat) akan dihapus.')) {
+        try { localStorage.clear(); } catch(_) {}
+        try { sessionStorage.clear(); } catch(_) {}
+        showToast('Mereset aplikasi...', 'info', 1500);
+        setTimeout(() => window.location.reload(), 1600);
+      }
+    });
+  }
+
+  // Settings modal
+  document.getElementById('close-settings-modal').addEventListener('click', () => {
+    document.getElementById('modal-settings').classList.add('hidden');
+  });
+  document.getElementById('cancel-settings').addEventListener('click', () => {
+    document.getElementById('modal-settings').classList.add('hidden');
+  });
+  document.getElementById('save-settings').addEventListener('click', saveSettings);
+
+  // Add Peer Manual
+  document.getElementById('add-peer-btn').addEventListener('click', () => {
+    document.getElementById('modal-add-peer').classList.remove('hidden');
+  });
+  document.getElementById('close-add-peer-modal').addEventListener('click', () => {
+    document.getElementById('modal-add-peer').classList.add('hidden');
+  });
+  document.getElementById('cancel-add-peer').addEventListener('click', () => {
+    document.getElementById('modal-add-peer').classList.add('hidden');
+  });
+  document.getElementById('confirm-add-peer').addEventListener('click', async () => {
+    const ip   = document.getElementById('peer-ip-input').value.trim();
+    const port = parseInt(document.getElementById('peer-port-input').value) || 7771;
+
+    if (!ip) { showToast('IP tidak boleh kosong', 'error'); return; }
+
+    try {
+      await ipc('add_peer_manual', { ip, port });
+      document.getElementById('modal-add-peer').classList.add('hidden');
+      showToast(`Menghubungkan ke ${ip}:${port}...`, 'info');
+    } catch (err) {
+      showToast('Gagal: ' + err, 'error');
+    }
+  });
+
+  // QR Code modal
+  document.getElementById('qr-btn').addEventListener('click', () => {
+    generateQR();
+    document.getElementById('modal-qr').classList.remove('hidden');
+  });
+  document.getElementById('close-qr-modal').addEventListener('click', () => {
+    document.getElementById('modal-qr').classList.add('hidden');
+  });
+  document.getElementById('close-qr-modal-btn').addEventListener('click', () => {
+    document.getElementById('modal-qr').classList.add('hidden');
+  });
+  document.getElementById('download-qr-btn').addEventListener('click', () => {
+    const canvas = document.getElementById('qr-canvas');
+    const link   = document.createElement('a');
+    link.download = 'caraka-qrcode.png';
+    link.href     = canvas.toDataURL();
+    link.click();
+  });
+
+  // Copy buttons
+  document.getElementById('copy-ip-btn').addEventListener('click', () => {
+    copyText(state.myLocalIp, 'IP berhasil disalin');
+  });
+  document.getElementById('copy-fp-btn').addEventListener('click', () => {
+    copyText(state.myFingerprint, 'Fingerprint berhasil disalin');
+  });
+  document.getElementById('copy-node-id-btn').addEventListener('click', () => {
+    copyText(state.myNodeId, 'Node ID berhasil disalin');
+  });
+
+  // Chat fingerprint copy
+  document.getElementById('chat-peer-fp').addEventListener('click', () => {
+    if (state.activePeerId) {
+      const peer = state.peers.get(state.activePeerId);
+      if (peer) copyText(peer.fingerprint || peer.nodeId, 'Fingerprint disalin');
+    }
+  });
+
+  // Retry connection
+  document.getElementById('retry-conn-btn').addEventListener('click', () => {
+    if (state.activePeerId) initiateConnection(state.activePeerId);
+  });
+
+  // Close modals on overlay click
+  document.querySelectorAll('.modal-overlay').forEach(overlay => {
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) overlay.classList.add('hidden');
+    });
+  });
+}
+
+function setupChatInput() {
+  const input   = document.getElementById('msg-input');
+  const sendBtn = document.getElementById('send-btn');
+  const charCnt = document.getElementById('msg-char-count');
+
+  input.addEventListener('input', () => {
+    const len = input.value.length;
+    charCnt.textContent = len;
+    const peer = state.activePeerId ? state.peers.get(state.activePeerId) : null;
+    sendBtn.disabled = len === 0 || !peer || peer.status !== 'connected';
+  });
+
+  // Auto-resize textarea
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 110) + 'px';
+  });
+
+  // Ctrl+Enter untuk kirim
+  input.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      if (!sendBtn.disabled) sendMessage();
+    }
+  });
+
+  sendBtn.addEventListener('click', sendMessage);
+}
+
+async function sendMessage() {
+  const input  = document.getElementById('msg-input');
+  const text   = input.value.trim();
+  if (!text || !state.activePeerId) return;
+
+  const peer = state.peers.get(state.activePeerId);
+  if (!peer || peer.status !== 'connected') {
+    showToast('Peer belum terhubung', 'warning');
+    return;
+  }
+
+  input.value = '';
+  input.style.height = 'auto';
+  document.getElementById('msg-char-count').textContent = '0';
+  document.getElementById('send-btn').disabled = true;
+
+  try {
+    // BUG #2 FIX: Rust command send_dm expects recipient_id dan plaintext
+    // Tauri auto-convert: recipientId → recipient_id, plaintext → plaintext
+    await ipc('send_dm', {
+      recipientId: state.activePeerId,
+      plaintext: text,
+    });
+  } catch (err) {
+    showToast('Gagal kirim: ' + err, 'error');
+    input.value = text; // Kembalikan teks
+  }
+}
+
+// ── Helper: Messages ───────────────────────────────────────────────────────
+
+function appendMessage(peerId, msg) {
+  if (!state.messages.has(peerId)) state.messages.set(peerId, []);
+  state.messages.get(peerId).push(msg);
+
+  // Render jika peer ini sedang aktif
+  if (state.activePeerId === peerId) {
+    renderMessages(peerId);
+  }
+}
+
+function renderMessages(peerId) {
+  const scroll   = document.getElementById('messages-scroll');
+  const msgs     = state.messages.get(peerId) || [];
+  const wasAtBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 20;
+
+  // Render hanya pesan baru (append saja)
+  // Untuk sederhana, re-render semua
+  scroll.innerHTML = '';
+
+  if (msgs.length === 0) {
+    scroll.innerHTML = `
+      <div class="empty-state" style="padding-top:60px;">
+        <div class="empty-state-icon">🔒</div>
+        <div class="empty-state-text">Belum ada pesan</div>
+        <small>Mulai percakapan terenkripsi pertama Anda</small>
+      </div>
+    `;
+    return;
+  }
+
+  let lastDate = '';
+
+  msgs.forEach(msg => {
+    const date = new Date(msg.timestamp * 1000).toLocaleDateString('id-ID');
+
+    if (date !== lastDate) {
+      const sep = document.createElement('div');
+      sep.className = 'date-separator';
+      sep.textContent = date;
+      scroll.appendChild(sep);
+      lastDate = date;
+    }
+
+    const wrapper = document.createElement('div');
+    wrapper.className = `msg-wrapper ${msg.outgoing ? 'outgoing' : 'incoming'}`;
+    wrapper.innerHTML = `
+      <div class="msg-bubble">
+        <div class="msg-text">${escapeHtml(msg.text)}</div>
+        <div class="msg-meta">
+          <span>${formatTimestamp(msg.timestamp)}</span>
+          <span>🔒</span>
+        </div>
+      </div>
+    `;
+    scroll.appendChild(wrapper);
+  });
+
+  if (wasAtBottom) scroll.scrollTop = scroll.scrollHeight;
+}
+
+// Muat history dari DB
+async function loadMessageHistory(peerId) {
+  try {
+    // BUG #6 FIX: perbaiki parameter name — Rust expects peer_id (JS: peerId)
+    const messages = await ipc('get_messages', { peerId: peerId, limit: 100 });
+    if (messages && messages.length > 0) {
+      state.messages.set(peerId, messages.map(m => ({
+        text:      m.text || m.plaintext,
+        timestamp: m.timestamp,
+        outgoing:  m.isOutgoing !== undefined ? m.isOutgoing : (m.direction === 'outgoing' || m.outgoing),
+      })));
+      renderMessages(peerId);
+    }
+  } catch (err) {
+    console.warn('Gagal load history:', err);
+  }
+}
+
+// ── Utility Functions ──────────────────────────────────────────────────────
 
 function escapeHtml(text) {
   return String(text)
@@ -100,486 +1624,339 @@ function escapeHtml(text) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
-    .replace(/\n/g, '<br>');
+    .replace(/'/g, '&#39;');
 }
 
-// ─── Initialization ────────────────────────────────────────────────────────
+function formatTimestamp(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+}
 
-async function initApp() {
-  await setupBackendListeners();
-  setupUIListeners();
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-  try {
-    const info = await invoke('init_node');
-    handleNodeReady({
-      nodeId: info.node_id,
-      fingerprint: info.fingerprint,
-      tcpPort: info.tcp_port,
-    });
-  } catch (e) {
-    console.log('Menunggu node_ready event...', e);
+// Warna avatar deterministic dari string (nodeId atau nama)
+function getAvatarColor(str) {
+  const colors = [
+    'linear-gradient(135deg, #20C9D8, #20808D)',
+    'linear-gradient(135deg, #2D5F9E, #4A9EBF)',
+    'linear-gradient(135deg, #1db87a, #20808D)',
+    'linear-gradient(135deg, #7B5EA7, #4A9EBF)',
+    'linear-gradient(135deg, #D97B2A, #e5a832)',
+    'linear-gradient(135deg, #d94f4f, #D97B2A)',
+    'linear-gradient(135deg, #20808D, #2D5F9E)',
+    'linear-gradient(135deg, #4A9EBF, #1db87a)',
+  ];
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash * 31 + str.charCodeAt(i)) | 0;
   }
+  return colors[Math.abs(hash) % colors.length];
 }
 
-// ─── Backend Event Listeners ───────────────────────────────────────────────
-
-async function setupBackendListeners() {
-  await listen('node_ready',            e => handleNodeReady(e.payload));
-  await listen('node_error',            e => { console.error(e.payload); showToast('Error: ' + e.payload.error, 'error', 5000); });
-  await listen('peer_discovered',       e => handlePeerDiscovered(e.payload));
-  await listen('peer_handshaked',       e => handlePeerHandshaked(e.payload));
-  await listen('peer_connected',        e => handlePeerConnected(e.payload));
-  await listen('peer_disconnected',     e => handlePeerDisconnected(e.payload));
-  await listen('clamp_packet_received', e => handleClampPacketReceived(e.payload));
-  await listen('message_sent',          e => handleMessageSent(e.payload));
-}
-
-// ─── Event Handlers ────────────────────────────────────────────────────────
-
-function handleNodeReady(payload) {
-  state.myNodeId = payload.nodeId;
-  state.myFingerprint = payload.fingerprint;
-
-  // Update fingerprint display
-  const fpEl = document.getElementById('fp-value');
-  if (fpEl) fpEl.textContent = payload.fingerprint;
-
-  const nodeShortEl = document.getElementById('my-node-id-short');
-  if (nodeShortEl) nodeShortEl.textContent = shortNodeId(payload.nodeId);
-
-  const settingsNodeEl = document.getElementById('settings-full-node-id');
-  if (settingsNodeEl) settingsNodeEl.textContent = payload.nodeId;
-
-  const settingsFpEl = document.getElementById('settings-fingerprint');
-  if (settingsFpEl) settingsFpEl.textContent = payload.fingerprint;
-
-  // Update avatar
-  const avatar = document.getElementById('my-avatar');
-  if (avatar) {
-    avatar.textContent = getAvatarLetter(state.myDisplayName);
-    avatar.style.background = getAvatarColor(state.myNodeId);
-  }
-
-  // Show app, hide loading
-  document.getElementById('loading-overlay').classList.add('hidden');
-  document.getElementById('app').classList.remove('hidden');
-
-  updateStatusSearching();
-  loadPeers();
-  showToast('✅ Node siap! Fingerprint: ' + state.myFingerprint, 'success');
-}
-
-function handlePeerDiscovered(payload) {
-  const { nodeId, displayName, ip, port } = payload;
-  if (!state.peers.has(nodeId)) {
-    state.peers.set(nodeId, {
-      nodeId,
-      displayName: displayName || 'Unknown',
-      isOnline: false,
-      fingerprint: nodeId.slice(0, 8),
-      ip, port,
-    });
-    renderPeersList();
-    showToast(`📡 Peer ditemukan: ${displayName || nodeId.slice(0, 8)}`, 'info');
-  }
-}
-
-function handlePeerHandshaked(payload) {
-  const { nodeId, displayName } = payload;
-  if (state.peers.has(nodeId)) {
-    state.peers.get(nodeId).displayName = displayName || state.peers.get(nodeId).displayName;
-  } else {
-    state.peers.set(nodeId, { nodeId, displayName: displayName || 'Unknown', isOnline: true, fingerprint: nodeId.slice(0, 8), ip: '', port: 7771 });
-  }
-  renderPeersList();
-}
-
-function handlePeerConnected(payload) {
-  const { nodeId, ip } = payload;
-  if (state.peers.has(nodeId)) {
-    state.peers.get(nodeId).isOnline = true;
-    state.peers.get(nodeId).ip = ip;
-  } else {
-    state.peers.set(nodeId, { nodeId, displayName: nodeId.slice(0, 8), isOnline: true, fingerprint: nodeId.slice(0, 8), ip, port: 7771 });
-  }
-  renderPeersList();
-  updateNetworkStatus();
-  if (state.selectedPeerId === nodeId) updateChatHeader(nodeId);
-  showToast(`🟢 Peer terhubung: ${shortNodeId(nodeId)}`, 'success');
-}
-
-function handlePeerDisconnected(payload) {
-  const { nodeId } = payload;
-  if (state.peers.has(nodeId)) state.peers.get(nodeId).isOnline = false;
-  renderPeersList();
-  updateNetworkStatus();
-  if (state.selectedPeerId === nodeId) updateChatHeader(nodeId);
-  showToast(`🔴 Peer terputus: ${shortNodeId(nodeId)}`, 'warning');
-}
-
-async function handleClampPacketReceived(payload) {
-  try {
-    const result = await invoke('try_decrypt_packet', {
-      packetId:     payload.packetId,
-      nonceHex:     payload.nonce,
-      ciphertextHex: payload.ciphertext,
-      aeadTagHex:   payload.aeadTag,
-    });
-    if (result) {
-      addIncomingMessage(result);
-      showToast(`💬 Pesan baru dari ${shortNodeId(result.sender_id)}`, 'info');
-    }
-  } catch (e) {
-    console.error('Error dekripsi paket:', e);
-  }
-}
-
-function handleMessageSent(payload) {
-  addOutgoingMessage({
-    id: payload.id,
-    sender_id: state.myNodeId,
-    recipient_id: payload.recipientId,
-    plaintext: payload.text,
-    timestamp: payload.timestamp,
-    is_outgoing: true,
+function findPeerByIp(ip) {
+  let found = null;
+  state.peers.forEach((peer, nodeId) => {
+    if (peer.ip === ip) found = nodeId;
   });
+  return found;
 }
 
-// ─── Message Rendering ─────────────────────────────────────────────────────
-
-function addOutgoingMessage(msg) {
-  if (!state.messages.has(msg.recipient_id)) state.messages.set(msg.recipient_id, []);
-  state.messages.get(msg.recipient_id).push(msg);
-  if (state.selectedPeerId === msg.recipient_id) appendMessageToDOM(msg);
+function copyText(text, successMsg = 'Disalin!') {
+  if (!text || text === '—') return;
+  navigator.clipboard.writeText(text)
+    .then(() => showToast(successMsg, 'success'))
+    .catch(() => showToast('Gagal menyalin', 'error'));
 }
 
-function addIncomingMessage(msgInfo) {
-  const msg = {
-    id: msgInfo.id,
-    sender_id: msgInfo.sender_id,
-    recipient_id: state.myNodeId,
-    plaintext: msgInfo.plaintext,
-    timestamp: msgInfo.timestamp,
-    is_outgoing: false,
-  };
-  if (!state.messages.has(msg.sender_id)) state.messages.set(msg.sender_id, []);
-  state.messages.get(msg.sender_id).push(msg);
-  if (state.selectedPeerId === msg.sender_id) appendMessageToDOM(msg);
+// ── 15. Emergency Mode — Komunikasi Saat Mati Lampu ──────────────────────
+
+/**
+ * Tampilkan banner darurat di atas aplikasi.
+ * @param {string} title - Judul banner
+ * @param {string} subtitle - Subtitle / deskripsi
+ */
+function showEmergencyBanner(title, subtitle) {
+  const banner = document.getElementById('emergency-banner');
+  if (!banner) return;
+  document.getElementById('emergency-banner-title').textContent = title || 'Jaringan Terputus';
+  document.getElementById('emergency-banner-sub').textContent   = subtitle || 'Mati lampu? Aktifkan Mode Darurat.';
+  banner.classList.remove('hidden');
+
+  // Tambah class ke view-app untuk visual tint
+  document.getElementById('view-app')?.classList.add('emergency-active');
+
+  // Update status bar
+  const netText = document.getElementById('home-net-text');
+  if (netText) netText.textContent = '⚡ Jaringan Terputus';
 }
 
-function appendMessageToDOM(msg) {
-  const scroll = document.getElementById('messages-scroll');
-  const wrapper = document.createElement('div');
-  wrapper.className = `message-wrapper ${msg.is_outgoing ? 'outgoing' : 'incoming'}`;
-  const bubble = document.createElement('div');
-  bubble.className = 'message-bubble';
-  bubble.innerHTML = `
-    <div class="message-text">${escapeHtml(msg.plaintext)}</div>
-    <div class="message-time">
-      <span class="message-encrypted-badge">🔒</span>
-      ${formatTime(msg.timestamp)}
-    </div>`;
-  wrapper.appendChild(bubble);
-  scroll.appendChild(wrapper);
-  scroll.scrollTop = scroll.scrollHeight;
+function hideEmergencyBanner() {
+  document.getElementById('emergency-banner')?.classList.add('hidden');
+  document.getElementById('view-app')?.classList.remove('emergency-active');
 }
 
-// ─── Peers List ────────────────────────────────────────────────────────────
-
-function renderPeersList() {
-  const list = document.getElementById('peers-list');
-  if (state.peers.size === 0) {
-    list.innerHTML = '<div class="empty-state small"><span>📡 Mencari peer di jaringan...</span></div>';
-    return;
-  }
-  list.innerHTML = '';
-  const sorted = [...state.peers.values()].sort((a, b) => {
-    if (a.isOnline !== b.isOnline) return b.isOnline - a.isOnline;
-    return a.displayName.localeCompare(b.displayName);
-  });
-  for (const peer of sorted) list.appendChild(createPeerItem(peer));
+/** Buka modal Emergency Mode dan refresh status */
+async function openEmergencyModal() {
+  document.getElementById('modal-emergency').classList.remove('hidden');
+  await refreshEmergencyStatus();
 }
 
-function createPeerItem(peer) {
-  const item = document.createElement('div');
-  item.className = `peer-item${state.selectedPeerId === peer.nodeId ? ' active' : ''}`;
-  item.dataset.nodeId = peer.nodeId;
-  const fp = peer.fingerprint || peer.nodeId.slice(0, 8);
-  item.innerHTML = `
-    <div class="peer-avatar">
-      <div class="peer-avatar-inner" style="background: ${getAvatarColor(peer.nodeId)}">${getAvatarLetter(peer.displayName)}</div>
-      <div class="peer-online-dot ${peer.isOnline ? 'online' : ''}"></div>
-    </div>
-    <div class="peer-details">
-      <div class="peer-name">${escapeHtml(peer.displayName)}</div>
-      <div class="peer-meta">
-        <span class="peer-fp">🔑 ${fp}</span>
-        <span class="peer-badge ${peer.isOnline ? 'online' : 'offline'}">${peer.isOnline ? '● Online' : '○ Offline'}</span>
-      </div>
-    </div>`;
-  item.addEventListener('click', () => selectPeer(peer.nodeId));
-  return item;
-}
-
-// ─── Chat ──────────────────────────────────────────────────────────────────
-
-async function selectPeer(peerId) {
-  state.selectedPeerId = peerId;
-  document.querySelectorAll('.peer-item').forEach(el => el.classList.toggle('active', el.dataset.nodeId === peerId));
-  document.getElementById('no-chat-state').classList.add('hidden');
-  document.getElementById('chat-view').classList.remove('hidden');
-  updateChatHeader(peerId);
-  updateSendButton();
-  await loadMessagesForPeer(peerId);
-}
-
-function updateChatHeader(peerId) {
-  const peer = state.peers.get(peerId);
-  if (!peer) return;
-  const fp = peer.fingerprint || peerId.slice(0, 8);
-  document.getElementById('chat-peer-avatar').textContent = getAvatarLetter(peer.displayName);
-  document.getElementById('chat-peer-avatar').style.background = getAvatarColor(peerId);
-  document.getElementById('chat-peer-name').textContent = peer.displayName;
-  document.getElementById('chat-peer-status-dot').className = `peer-status-dot ${peer.isOnline ? 'online' : ''}`;
-  document.getElementById('chat-peer-status-text').textContent = peer.isOnline ? 'Online' : 'Offline';
-  document.getElementById('chat-peer-fp').textContent = `🔑 ${fp}`;
-  document.getElementById('relay-info').textContent = peer.isOnline ? '' : '📦 Pesan disimpan, dikirim saat peer online';
-}
-
-async function loadMessagesForPeer(peerId) {
-  const scroll = document.getElementById('messages-scroll');
-  scroll.innerHTML = '<div class="empty-state"><span>Memuat riwayat pesan...</span></div>';
+/** Refresh status di dalam modal emergency */
+async function refreshEmergencyStatus() {
   try {
-    const messages = await invoke('get_messages', { peerId, limit: 50 });
-    scroll.innerHTML = '';
-    if (messages.length === 0) {
-      scroll.innerHTML = '<div class="empty-state"><span>🔒</span><span>Belum ada pesan. Kirim pesan pertama!</span></div>';
-      return;
+    const status = await ipc('get_emergency_status');
+    document.getElementById('em-net-state').textContent    = status.networkState || '—';
+    document.getElementById('em-hotspot-state').textContent =
+      status.hotspotActive ? `✅ Aktif (${status.hotspotSsid})` : '❌ Tidak aktif';
+    document.getElementById('em-peer-count').textContent   = String(status.connectedPeers || 0);
+  } catch (e) {
+    console.warn('[Emergency] Gagal refresh status:', e);
+  }
+}
+
+/** Setup semua interaksi Emergency Mode */
+function setupEmergencyMode() {
+  // Tombol di banner → buka modal
+  document.getElementById('btn-emergency-host')?.addEventListener('click', () => {
+    openEmergencyModal();
+    // Scroll ke pilihan host
+    setTimeout(() => document.getElementById('choice-host')?.scrollIntoView({ behavior: 'smooth' }), 200);
+  });
+
+  document.getElementById('btn-emergency-join')?.addEventListener('click', () => {
+    openEmergencyModal();
+    setTimeout(() => document.getElementById('choice-join')?.scrollIntoView({ behavior: 'smooth' }), 200);
+  });
+
+  document.getElementById('btn-emergency-dismiss')?.addEventListener('click', hideEmergencyBanner);
+
+  // Quick action button di Home
+  document.getElementById('qa-emergency')?.addEventListener('click', openEmergencyModal);
+
+  // Tutup modal
+  document.getElementById('close-emergency-modal')?.addEventListener('click', () => {
+    document.getElementById('modal-emergency').classList.add('hidden');
+  });
+
+  // ── Activate Hotspot ────────────────────────────────────────────────────
+  document.getElementById('btn-activate-hotspot')?.addEventListener('click', async () => {
+    const btn = document.getElementById('btn-activate-hotspot');
+    btn.disabled = true;
+    btn.textContent = '⏳ Mengaktifkan...';
+
+    try {
+      const result = await ipc('activate_emergency_hotspot');
+      showToast(result, 'success', 6000);
+      pushNotif('warn', '⚡', `<strong>Hotspot darurat aktif</strong>: CARAKA-Emergency (tanpa password)`);
+      await refreshEmergencyStatus();
+
+      // Update banner jadi "Hotspot Aktif"
+      showEmergencyBanner(
+        '⚡ Hotspot Darurat Aktif',
+        'SSID: CARAKA-Emergency (tanpa password) — Tunggu rekan terhubung'
+      );
+    } catch (err) {
+      // Tampilkan instruksi manual fallback
+      document.getElementById('emergency-manual-note').style.display = 'block';
+      showToast('Hotspot gagal — lihat instruksi manual di bawah', 'warning', 8000);
+      console.warn('[Emergency] Hotspot gagal:', err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '📶 Aktifkan Hotspot';
     }
-    let lastDate = null;
-    for (const msg of [...messages].reverse()) {
-      const msgDate = formatDate(msg.timestamp);
-      if (msgDate !== lastDate) {
-        const sep = document.createElement('div');
-        sep.className = 'date-separator';
-        sep.textContent = msgDate;
-        scroll.appendChild(sep);
-        lastDate = msgDate;
+  });
+
+  // ── Open WiFi Settings ──────────────────────────────────────────────────
+  document.getElementById('btn-open-wifi-settings')?.addEventListener('click', async () => {
+    try {
+      // Buka ms-settings:network-wifi via shell
+      await ipc('add_peer_manual', { ip: '0.0.0.0', port: 0 })
+        .catch(() => {}); // Ignore error, hanya trigger shell
+
+      // Alternatif: gunakan window.open dengan ms-settings scheme
+      // (tidak selalu berhasil di webview)
+      showToast('Buka WiFi Settings di Windows, konek ke CARAKA-Emergency', 'info', 6000);
+    } catch (_) {
+      showToast('Buka Settings > WiFi > CARAKA-Emergency', 'info', 6000);
+    }
+  });
+
+  // ── Scan Emergency Network ──────────────────────────────────────────────
+  document.getElementById('btn-scan-emergency')?.addEventListener('click', async () => {
+    const btn = document.getElementById('btn-scan-emergency');
+    btn.disabled = true;
+    btn.textContent = '🔍 Scanning 192.168.137.x...';
+
+    showToast('Scanning subnet 192.168.137.x untuk peer CARAKA...', 'info', 3000);
+
+    try {
+      const foundIps = await ipc('scan_emergency_network');
+      if (foundIps.length === 0) {
+        showToast('Tidak ada peer ditemukan. Pastikan terhubung ke CARAKA-Emergency WiFi.', 'warning', 6000);
+      } else {
+        showToast(`✅ ${foundIps.length} peer ditemukan — mencoba terhubung...`, 'success', 5000);
+        pushNotif('peer', '🔍', `Scan darurat: <strong>${foundIps.length} peer</strong> ditemukan di subnet hotspot`);
       }
-      const wrapper = document.createElement('div');
-      wrapper.className = `message-wrapper ${msg.isOutgoing ? 'outgoing' : 'incoming'}`;
-      const bubble = document.createElement('div');
-      bubble.className = 'message-bubble';
-      bubble.innerHTML = `
-        <div class="message-text">${escapeHtml(msg.text)}</div>
-        <div class="message-time">
-          <span class="message-encrypted-badge">🔒</span>
-          ${formatTime(msg.timestamp)}
-          ${msg.decrypted ? '' : '<span style="color:rgba(255,100,100,0.7)">⚠</span>'}
-        </div>`;
-      wrapper.appendChild(bubble);
-      scroll.appendChild(wrapper);
-    }
-    scroll.scrollTop = scroll.scrollHeight;
-  } catch (e) {
-    console.error('Error load messages:', e);
-    scroll.innerHTML = '<div class="empty-state"><span>Error memuat pesan</span></div>';
-  }
-}
-
-// ─── Network Status ────────────────────────────────────────────────────────
-
-async function loadPeers() {
-  try {
-    const peers = await invoke('get_peers');
-    for (const peer of peers) {
-      state.peers.set(peer.node_id, {
-        nodeId: peer.node_id,
-        displayName: peer.display_name,
-        isOnline: peer.is_online,
-        fingerprint: peer.fingerprint,
-        ip: peer.ip_address,
-        port: peer.tcp_port,
-      });
-    }
-    renderPeersList();
-    updateNetworkStatus();
-  } catch (e) {
-    console.error('Error load peers:', e);
-  }
-}
-
-async function updateNetworkStatus() {
-  try {
-    const status = await invoke('get_network_status');
-    const dot = document.getElementById('status-dot');
-    const text = document.getElementById('status-text');
-    const count = document.getElementById('connected-count');
-    if (count) count.textContent = status.connected_peers;
-    if (status.connected_peers > 0) {
-      dot.className = 'status-dot online';
-      text.textContent = `${status.connected_peers} peer aktif`;
-    } else {
-      dot.className = 'status-dot searching';
-      text.textContent = 'Mencari peer...';
-    }
-  } catch (e) {
-    console.error('Error get status:', e);
-  }
-}
-
-function updateStatusSearching() {
-  const dot = document.getElementById('status-dot');
-  const text = document.getElementById('status-text');
-  if (dot) dot.className = 'status-dot searching';
-  if (text) text.textContent = 'Mencari peer...';
-}
-
-// ─── Send Message ──────────────────────────────────────────────────────────
-
-async function sendMessage() {
-  const input = document.getElementById('message-input');
-  const text = input.value.trim();
-  if (!text || !state.selectedPeerId) return;
-
-  const sendBtn = document.getElementById('send-btn');
-  sendBtn.disabled = true;
-
-  try {
-    await invoke('send_dm', { recipientId: state.selectedPeerId, plaintext: text });
-    input.value = '';
-    updateCharCount();
-    input.style.height = 'auto';
-  } catch (e) {
-    console.error('Error send:', e);
-    showToast('Gagal kirim: ' + e, 'error');
-  } finally {
-    sendBtn.disabled = !document.getElementById('message-input').value.trim();
-  }
-}
-
-// ─── UI Event Listeners ────────────────────────────────────────────────────
-
-function setupUIListeners() {
-  const messageInput = document.getElementById('message-input');
-
-  messageInput.addEventListener('input', () => {
-    updateCharCount();
-    updateSendButton();
-    autoResizeTextarea(messageInput);
-  });
-
-  messageInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      if (!document.getElementById('send-btn').disabled) sendMessage();
+      await refreshEmergencyStatus();
+    } catch (err) {
+      showToast('Scan gagal: ' + err, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '🔍 Cari Peer Darurat';
     }
   });
 
-  document.getElementById('send-btn').addEventListener('click', sendMessage);
+  // ── Reconnect Known Peers ───────────────────────────────────────────────
+  document.getElementById('btn-reconnect-known')?.addEventListener('click', async () => {
+    const btn = document.getElementById('btn-reconnect-known');
+    btn.disabled = true;
+    btn.textContent = '⏳ Mencoba reconnect...';
 
-  // Add peer modal
-  document.getElementById('add-peer-btn').addEventListener('click', () =>
-    document.getElementById('add-peer-modal').classList.remove('hidden'));
-  document.getElementById('close-modal-btn').addEventListener('click', () =>
-    document.getElementById('add-peer-modal').classList.add('hidden'));
-  document.getElementById('cancel-modal-btn').addEventListener('click', () =>
-    document.getElementById('add-peer-modal').classList.add('hidden'));
-  document.getElementById('confirm-add-peer-btn').addEventListener('click', async () => {
-    const ip = document.getElementById('peer-ip-input').value.trim();
-    const port = parseInt(document.getElementById('peer-port-input').value) || 7771;
-    if (!ip) { showToast('Masukkan IP address peer', 'warning'); return; }
     try {
-      const result = await invoke('add_peer_manual', { ip, port });
-      showToast(result, 'info');
-      document.getElementById('add-peer-modal').classList.add('hidden');
-      document.getElementById('peer-ip-input').value = '';
-    } catch (e) { showToast('Error: ' + e, 'error'); }
+      const count = await ipc('reconnect_known_peers');
+      if (count === 0) {
+        showToast('Tidak ada peer terkenal untuk di-reconnect', 'warning');
+      } else {
+        showToast(`Mencoba reconnect ke ${count} peer terkenal...`, 'info', 4000);
+        pushNotif('system', '↩', `Mencoba <strong>reconnect ${count} peer</strong> dari sesi sebelumnya`);
+      }
+    } catch (err) {
+      showToast('Reconnect gagal: ' + err, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '↺ Reconnect Semua Peer Terkenal';
+    }
   });
+}
 
-  // Settings modal
-  document.getElementById('settings-btn').addEventListener('click', () => {
-    document.getElementById('display-name-input').value = state.myDisplayName;
-    document.getElementById('settings-modal').classList.remove('hidden');
-  });
-  document.getElementById('close-settings-btn').addEventListener('click', () =>
-    document.getElementById('settings-modal').classList.add('hidden'));
-  document.getElementById('cancel-settings-btn').addEventListener('click', () =>
-    document.getElementById('settings-modal').classList.add('hidden'));
-  document.getElementById('save-settings-btn').addEventListener('click', async () => {
-    const name = document.getElementById('display-name-input').value.trim();
-    if (!name) { showToast('Nama tidak boleh kosong', 'warning'); return; }
-    try {
-      await invoke('set_display_name', { name });
-      state.myDisplayName = name;
-      document.getElementById('my-display-name').textContent = name;
-      const av = document.getElementById('my-avatar');
-      if (av) av.textContent = getAvatarLetter(name);
-      document.getElementById('settings-modal').classList.add('hidden');
-      showToast('Nama berhasil diubah', 'success');
-    } catch (e) { showToast('Error: ' + e, 'error'); }
-  });
+/** Setup event listeners untuk Emergency Mode events dari backend */
+async function setupEmergencyEventListeners() {
+  // Jaringan hilang
+  await on('network_lost', (event) => {
+    const d = event.payload;
+    console.log('[Emergency] Network lost:', d);
+    showEmergencyBanner('⚡ Jaringan Terputus', d.message || 'Router mati? Aktifkan Mode Darurat.');
+    pushNotif('warn', '⚡', `<strong>Jaringan terputus</strong> — ${d.message || 'Aktifkan Mode Darurat'}`);
 
-  // Copy Node ID
-  document.getElementById('copy-node-id-btn').addEventListener('click', () => {
-    if (state.myNodeId) {
-      navigator.clipboard.writeText(state.myNodeId);
-      showToast('Node ID disalin!', 'success');
+    // Update status network di UI
+    const netText = document.getElementById('home-net-text');
+    if (netText) netText.textContent = '⚡ Terputus';
+
+    const netDot = document.getElementById('home-net-dot');
+    if (netDot) {
+      netDot.style.background = '#f97316';
+      netDot.style.boxShadow  = '0 0 8px rgba(249,115,22,0.8)';
     }
   });
 
-  // Close modal on overlay click
-  document.querySelectorAll('.modal-overlay').forEach(overlay => {
-    overlay.addEventListener('click', e => {
-      if (e.target === overlay) overlay.classList.add('hidden');
-    });
+  // Jaringan kembali
+  await on('network_restored', (event) => {
+    const d = event.payload;
+    console.log('[Emergency] Network restored:', d);
+    hideEmergencyBanner();
+    showToast('✅ ' + (d.message || 'Jaringan kembali normal'), 'success', 5000);
+    pushNotif('system', '✅', `<strong>Jaringan pulih</strong> — Mode normal aktif kembali`);
+
+    // Restore status dot
+    const netDot = document.getElementById('home-net-dot');
+    if (netDot) {
+      netDot.style.background = '';
+      netDot.style.boxShadow  = '';
+      netDot.className = 'status-dot searching';
+    }
   });
 
-  // Periodic refresh
-  setInterval(updateNetworkStatus, 10000);
-  setInterval(loadPeers, 30000);
+  // Emergency mode aktif (hotspot terdeteksi)
+  await on('emergency_mode_active', (event) => {
+    const d = event.payload;
+    showEmergencyBanner('⚡ Mode Darurat Aktif', d.message || 'Hotspot darurat aktif');
+    pushNotif('warn', '📶', `<strong>Mode Darurat aktif</strong> — ${d.message || ''}`);
+  });
+
+  // Hotspot berhasil diaktifkan
+  await on('emergency_hotspot_started', (event) => {
+    const d = event.payload;
+    showToast(`Hotspot '${d.ssid}' aktif — rekan bisa konek tanpa password`, 'success', 8000);
+    showEmergencyBanner('📶 Hotspot Aktif', `SSID: ${d.ssid} (tanpa password) — Menunggu rekan terhubung`);
+  });
+
+  // Hotspot perlu manual
+  await on('emergency_hotspot_manual_needed', (event) => {
+    const d = event.payload;
+    document.getElementById('emergency-manual-note').style.display = 'block';
+    showToast('Buka Windows Settings → Mobile Hotspot secara manual', 'warning', 8000);
+  });
+
+  // Hotspot dimatikan
+  await on('emergency_hotspot_stopped', () => {
+    hideEmergencyBanner();
+    showToast('Hotspot darurat dimatikan', 'info');
+  });
 }
 
-function updateCharCount() {
-  const input = document.getElementById('message-input');
-  const el = document.getElementById('char-count');
-  if (el) el.textContent = `${input.value.length}/4096`;
-}
-
-function updateSendButton() {
-  const input = document.getElementById('message-input');
-  const sendBtn = document.getElementById('send-btn');
-  sendBtn.disabled = !input.value.trim() || !state.selectedPeerId;
-}
-
-function autoResizeTextarea(textarea) {
-  textarea.style.height = 'auto';
-  textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
-}
-
-// ─── Entry Point ────────────────────────────────────────────────────────────
-
-function waitForTauri(callback, retries = 50) {
-  if (window.__TAURI_INTERNALS__) {
-    callback();
-  } else if (retries > 0) {
-    setTimeout(() => waitForTauri(callback, retries - 1), 100);
-  } else {
-    const sub = document.querySelector('.loading-subtitle');
-    if (sub) sub.textContent = 'Error: Tauri IPC tidak tersedia. Pastikan app dijalankan via cargo tauri dev';
-  }
-}
+// ── Bootstrap ──────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('my-display-name').textContent = state.myDisplayName;
+  const statusEl = document.getElementById('splash-status');
 
-  waitForTauri(async () => {
+  // Tauri API detection — sets _invoke and _listen
+  function detectTauriAPI() {
+    if (window.__TAURI__?.core?.invoke) {
+      _invoke = (...a) => window.__TAURI__.core.invoke(...a);
+      _listen = window.__TAURI__.event?.listen
+        ? (...a) => window.__TAURI__.event.listen(...a)
+        : null;
+      return true;
+    }
+    if (window.__TAURI_INTERNALS__?.invoke) {
+      _invoke = (...a) => window.__TAURI_INTERNALS__.invoke(...a);
+      _listen = window.__TAURI_INTERNALS__.listen
+        ? (...a) => window.__TAURI_INTERNALS__.listen(...a)
+        : null;
+      return true;
+    }
+    if (window.__TAURI__?.invoke) {
+      _invoke = (...a) => window.__TAURI__.invoke(...a);
+      _listen = window.__TAURI__.event?.listen
+        ? (...a) => window.__TAURI__.event.listen(...a)
+        : null;
+      return true;
+    }
+    return false;
+  }
+
+  // Sequential: Tunggu Tauri API terdeteksi, LALU jalankan initApp
+  async function waitForTauriAndStart() {
+    if (statusEl) statusEl.textContent = 'Mendeteksi runtime...';
+
+    // Coba deteksi API (max 8 detik, poll setiap 100ms)
+    for (let i = 0; i < 80; i++) {
+      if (detectTauriAPI()) {
+        console.log('[CARAKA] Tauri API terdeteksi pada percobaan ke-' + (i + 1));
+        break;
+      }
+      await new Promise(r => setTimeout(r, 100));
+    }
+
+    if (!_invoke) {
+      if (statusEl) statusEl.textContent = 'Tauri runtime tidak ditemukan';
+      console.error('[CARAKA] Tauri API not found. __TAURI__:', window.__TAURI__);
+      return;
+    }
+
+    // API siap — mulai init
+    if (statusEl) statusEl.textContent = 'Menginisialisasi node...';
     try {
       await initApp();
-    } catch (e) {
-      console.error('Error inisialisasi:', e);
-      const sub = document.querySelector('.loading-subtitle');
-      if (sub) sub.textContent = 'Error: ' + (e.message || e);
+    } catch (err) {
+      console.error('[CARAKA] initApp fatal error:', err);
+      if (statusEl) statusEl.textContent = 'Error: ' + String(err).substring(0, 80);
     }
-  });
+  }
+
+  waitForTauriAndStart();
 });
+
+})(); // end IIFE

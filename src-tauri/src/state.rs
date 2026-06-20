@@ -12,6 +12,7 @@ use rusqlite::Connection;
 use crate::keys::{NodePublicKey, NodePrivateKey};
 use crate::routing::Router;
 use crate::transport::PeerSenders;
+use crate::network_monitor::NetworkState;
 
 /// Shared application state yang dikelola Tauri.
 ///
@@ -31,6 +32,12 @@ pub struct AppState {
     pub display_name: String,
     /// Map dari peer_id → sender channel (untuk broadcast)
     pub peer_senders: PeerSenders,
+    /// Status jaringan saat ini (Normal / Lost / Emergency)
+    pub network_state: Arc<Mutex<NetworkState>>,
+    /// BUG #4 FIX: Hop MAC key — derived dari private key via HKDF-SHA256.
+    /// Lebih aman dari [0u8;16] karena unik per node.
+    /// TODO: untuk relay chain yang benar, perlu key exchange per-channel.
+    pub hop_mac_key: [u8; 16],
 }
 
 /// Inisialisasi AppState dan start background services.
@@ -55,21 +62,54 @@ pub async fn initialize(app_handle: tauri::AppHandle) -> anyhow::Result<()> {
     let conn = store::open_db(&db_path)?;
 
     // 3. Load atau generate identity keypair
+    // BUG #5 FIX: Coba keyring dulu, fallback ke SQLite
     let (private_key, public_key) = {
-        // Coba load dari database
-        let existing = store::load_identity_key(&conn, "node_identity")?;
+        // A. Coba load dari keyring (Windows Credential Manager)
+        let from_keyring: Option<Vec<u8>> = {
+            match keyring::Entry::new("caraka-desktop", "node-private-key") {
+                Ok(entry) => {
+                    match entry.get_password() {
+                        Ok(hex_key) => {
+                            hex::decode(&hex_key).ok()
+                        }
+                        Err(_) => None,
+                    }
+                }
+                Err(_) => None,
+            }
+        };
 
-        if let Some(key_bytes) = existing {
+        if let Some(key_bytes) = from_keyring {
             if let Ok(arr) = key_bytes.try_into() {
                 let priv_key = NodePrivateKey(arr);
                 let pub_key = keys::public_key_from_private(&priv_key);
-                tracing::info!("Identity key loaded dari database");
+                tracing::info!("Identity key loaded dari keyring (Windows Credential Manager)");
                 (priv_key, pub_key)
             } else {
                 generate_and_save_keypair(&conn)?
             }
         } else {
-            generate_and_save_keypair(&conn)?
+            // B. Fallback: coba load dari database
+            let existing = store::load_identity_key(&conn, "node_identity")?;
+            if let Some(key_bytes) = existing {
+                if let Ok(arr) = key_bytes.try_into() {
+                    let priv_key = NodePrivateKey(arr);
+                    let pub_key = keys::public_key_from_private(&priv_key);
+
+                    // Migrasi: simpan ke keyring juga untuk keamanan lebih baik
+                    if let Ok(entry) = keyring::Entry::new("caraka-desktop", "node-private-key") {
+                        let _ = entry.set_password(&hex::encode(&priv_key.0));
+                        tracing::info!("Identity key dimigrasikan dari DB ke keyring");
+                    }
+
+                    tracing::info!("Identity key loaded dari database (fallback)");
+                    (priv_key, pub_key)
+                } else {
+                    generate_and_save_keypair(&conn)?
+                }
+            } else {
+                generate_and_save_keypair(&conn)?
+            }
         }
     };
 
@@ -82,21 +122,44 @@ pub async fn initialize(app_handle: tauri::AppHandle) -> anyhow::Result<()> {
         fingerprint
     );
 
-    // 4. Inisialisasi Router
+    // 4. Load display_name dari database (fallback ke "User")
+    let display_name = crate::store::load_setting(&conn, "display_name")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "User".to_string());
+
+    // 5. Inisialisasi Router
     let router = Router::new(public_key.clone());
 
-    // 5. Buat PeerSenders
+    // 5b. BUG #4 FIX: Derive hop_mac_key dari private key menggunakan HKDF-SHA256
+    // Ini lebih aman dari [0u8;16] karena unik per node dan tidak mudah ditebak.
+    let hop_mac_key = {
+        use hkdf::Hkdf;
+        use sha2::Sha256;
+        let hk = Hkdf::<Sha256>::new(Some(b"CARAKA-HOP-MAC-v1"), &private_key.0);
+        let mut key = [0u8; 16];
+        hk.expand(b"hop-authentication", &mut key)
+            .expect("HKDF expand untuk hop_mac_key");
+        key
+    };
+
+    // 6. Buat PeerSenders
     let peer_senders: PeerSenders = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
-    // 6. Build AppState
+    // 6b. Buat NetworkState (mulai dengan Normal)
+    let network_state: Arc<Mutex<NetworkState>> = Arc::new(Mutex::new(NetworkState::Normal));
+
+    // 7. Build AppState
     let state = AppState {
         node_id_hex: node_id_hex.clone(),
         my_node_id: public_key.clone(),
         my_private_key: private_key,
         db_conn: Arc::new(Mutex::new(conn)),
         router: Arc::new(Mutex::new(router)),
-        display_name: "User".to_string(),
+        display_name,
         peer_senders: peer_senders.clone(),
+        network_state: network_state.clone(),
+        hop_mac_key,
     };
 
     // 7. Manage state di Tauri
@@ -119,6 +182,13 @@ pub async fn initialize(app_handle: tauri::AppHandle) -> anyhow::Result<()> {
         crate::discovery::start_listener(handle).await;
     });
 
+    // Start network monitor — deteksi mati lampu / hilangnya jaringan
+    let handle = app_handle.clone();
+    let ns = network_state.clone();
+    tokio::spawn(async move {
+        crate::network_monitor::start_network_monitor(handle, ns).await;
+    });
+
     // 9. Listen event connect_to_peer dari discovery
     {
         let handle = app_handle.clone();
@@ -127,10 +197,14 @@ pub async fn initialize(app_handle: tauri::AppHandle) -> anyhow::Result<()> {
             if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
                 let ip = payload["ip"].as_str().unwrap_or("").to_string();
                 let port = payload["port"].as_u64().unwrap_or(7771) as u16;
+                // [FIX #6] Teruskan nodeId ke connect_to_peer untuk cek duplikat yang benar
+                let node_id = payload["nodeId"].as_str().unwrap_or("").to_string();
                 let handle2 = handle.clone();
                 let senders2 = senders.clone();
                 tokio::spawn(async move {
-                    crate::transport::connect_to_peer(&ip, port, handle2, senders2).await;
+                    // [FIX #6] node_id sebagai Option<String>
+                    let node_id_hint: Option<String> = if node_id.is_empty() { None } else { Some(node_id) };
+                    crate::transport::connect_to_peer(&ip, port, node_id_hint.as_deref(), handle2, senders2).await;
                 });
             }
         });
@@ -152,7 +226,7 @@ pub async fn initialize(app_handle: tauri::AppHandle) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Generate keypair baru dan simpan ke database.
+/// Generate keypair baru dan simpan ke keyring + database.
 fn generate_and_save_keypair(
     conn: &Connection,
 ) -> anyhow::Result<(NodePrivateKey, NodePublicKey)> {
@@ -161,7 +235,16 @@ fn generate_and_save_keypair(
 
     let (priv_key, pub_key) = keys::generate_keypair();
 
-    // Simpan private key ke database (bytes mentah)
+    // BUG #5 FIX: Simpan ke keyring DULU (lebih aman)
+    if let Ok(entry) = keyring::Entry::new("caraka-desktop", "node-private-key") {
+        if entry.set_password(&hex::encode(&priv_key.0)).is_ok() {
+            tracing::info!("Identity key tersimpan di Windows Credential Manager");
+        } else {
+            tracing::warn!("Gagal simpan ke keyring — fallback ke database saja");
+        }
+    }
+
+    // Tetap simpan ke database sebagai fallback/backup
     store::save_identity_key(conn, "node_identity", "identity", &priv_key.0)?;
 
     tracing::info!("Identity key baru di-generate dan disimpan");

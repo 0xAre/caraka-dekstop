@@ -10,7 +10,9 @@
 pub mod commands;
 pub mod crypto;
 pub mod discovery;
+pub mod hotspot;
 pub mod keys;
+pub mod network_monitor;
 pub mod packet;
 pub mod routing;
 pub mod state;
@@ -18,7 +20,7 @@ pub mod store;
 pub mod sync;
 pub mod transport;
 
-use tauri::Emitter;
+use tauri::{Manager, Emitter};
 use tracing_subscriber::EnvFilter;
 
 // ─── Main Entry Point ──────────────────────────────────────────────────────
@@ -39,6 +41,14 @@ async fn main() {
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
+
+            // Di debug mode: auto-buka DevTools untuk inspeksi JS
+            #[cfg(debug_assertions)]
+            {
+                if let Some(win) = app.get_webview_window("main") {
+                    win.open_devtools();
+                }
+            }
 
             // Inisialisasi semua komponen secara async
             tauri::async_runtime::spawn(async move {
@@ -62,6 +72,18 @@ async fn main() {
             commands::get_peers,
             commands::add_peer_manual,
             commands::get_network_status,
+            commands::get_local_ip,
+            commands::send_broadcast,
+            // Emergency Mode commands
+            commands::activate_emergency_hotspot,
+            commands::deactivate_emergency_hotspot,
+            commands::get_emergency_status,
+            commands::reconnect_known_peers,
+            commands::scan_emergency_network,
+            // FITUR 4A: QR Code peer discovery
+            commands::generate_peer_qr,
+            // FITUR 4B: Safety number verification
+            commands::compute_safety_number,
         ])
         .run(tauri::generate_context!())
         .expect("error saat menjalankan CARAKA Desktop");
