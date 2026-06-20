@@ -1,0 +1,84 @@
+name: CARAKA Desktop Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build CARAKA Desktop (NSIS + MSI)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'CARAKA Desktop ${{ github.ref_name }}'
+          releaseBody: |
+            ## CARAKA Desktop ${{ github.ref_name }}
+
+            Secure Offline Mesh Communication — P2P encrypted messenger with CLAMP protocol.
+
+            ### Changes
+            See [CHANGELOG.md](CHANGELOG.md) for details.
+
+            ### Installation
+            - **Windows**: Download `.exe` (NSIS installer) or `.msi`
+            - Run as Administrator for first-time install
+
+            ### Security
+            - End-to-end encrypted with Ascon-128 (NIST SP 800-232)
+            - X25519 ECDH key exchange
+            - Private key protected by Windows Credential Manager
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+
+  # Opsional: lint + test sebelum release
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+      - name: Cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+      - name: Cargo clippy (warnings as errors)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings

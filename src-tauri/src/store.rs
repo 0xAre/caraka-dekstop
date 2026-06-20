@@ -132,6 +132,12 @@ fn create_tables(conn: &Connection) -> Result<(), StoreError> {
             PRIMARY KEY (peer_id)
         );
 
+        -- Tabel settings (key-value store untuk konfigurasi user)
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
         -- Index untuk query cepat
         CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);
         CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient_id);
@@ -459,6 +465,41 @@ pub fn increment_msg_counter(conn: &Connection, peer_id: &str) -> Result<u64, St
     )?;
 
     Ok(counter as u64)
+}
+
+// ─── Settings (Key-Value) ──────────────────────────────────────────────────
+
+/// Simpan setting ke database.
+pub fn save_setting(conn: &Connection, key: &str, value: &str) -> Result<(), StoreError> {
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+/// Load setting dari database. Return None jika belum ada.
+pub fn load_setting(conn: &Connection, key: &str) -> Result<Option<String>, StoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT value FROM settings WHERE key = ?1"
+    )?;
+
+    let val = stmt
+        .query_map(params![key], |row| row.get::<_, String>(0))?
+        .flatten()
+        .next();
+
+    Ok(val)
+}
+
+/// Ambil semua packet_id pesan yang tersimpan (untuk epidemic sync fingerprint exchange).
+pub fn get_all_message_ids(conn: &Connection) -> Result<Vec<String>, StoreError> {
+    let mut stmt = conn.prepare("SELECT packet_id FROM messages ORDER BY received_at DESC LIMIT 500")?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .flatten()
+        .collect();
+    Ok(ids)
 }
 
 // ─── Unit Tests ─────────────────────────────────────────────────────────────
