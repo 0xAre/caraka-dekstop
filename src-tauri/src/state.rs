@@ -35,6 +35,8 @@ pub struct AppState {
     pub peer_senders: PeerSenders,
     pub network_state: Arc<Mutex<NetworkState>>,
     pub hop_mac_key: [u8; 16],
+    /// Tor context — None sampai bootstrap selesai (~30-60 detik pertama kali)
+    pub tor_ctx: Arc<Mutex<Option<Arc<crate::tor::TorContext>>>>,
 }
 
 /// Phase 1: Cek vault, emit status ke frontend.
@@ -112,6 +114,9 @@ pub async fn complete_initialize(
     let peer_senders: PeerSenders = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let network_state: Arc<Mutex<NetworkState>> = Arc::new(Mutex::new(NetworkState::Normal));
 
+    // 7b. Tor context placeholder — diisi async setelah AppState tersimpan
+    let tor_ctx: Arc<Mutex<Option<Arc<crate::tor::TorContext>>>> = Arc::new(Mutex::new(None));
+
     // 8. Build AppState
     let app_state = AppState {
         node_id_hex: node_id_hex.clone(),
@@ -123,6 +128,7 @@ pub async fn complete_initialize(
         peer_senders: peer_senders.clone(),
         network_state: network_state.clone(),
         hop_mac_key,
+        tor_ctx: tor_ctx.clone(),
     };
 
     // 9. Set managed Option<AppState> dari None → Some
@@ -198,6 +204,41 @@ pub async fn complete_initialize(
         crate::transport::DATA_PORT,
         crate::discovery::DISCOVERY_PORT
     );
+
+    // 13. Bootstrap Tor di background — tidak memblokir startup
+    let tor_data_dir = app_handle.path().app_data_dir()?;
+    let tor_handle = app_handle.clone();
+    tokio::spawn(async move {
+        let cache_dir = tor_data_dir.join("tor").join("cache");
+        let state_dir = tor_data_dir.join("tor").join("state");
+
+        tor_handle
+            .emit("tor_status", serde_json::json!({ "status": "bootstrapping" }))
+            .ok();
+
+        match crate::tor::TorContext::launch(&cache_dir, &state_dir).await {
+            Ok(ctx) => {
+                let onion = ctx.onion_address.clone();
+                *tor_ctx.lock().await = Some(ctx);
+                tracing::info!("Tor siap → {}", onion);
+                tor_handle
+                    .emit(
+                        "tor_status",
+                        serde_json::json!({ "status": "ready", "onionAddress": onion }),
+                    )
+                    .ok();
+            }
+            Err(e) => {
+                tracing::warn!("Tor bootstrap gagal: {}", e);
+                tor_handle
+                    .emit(
+                        "tor_status",
+                        serde_json::json!({ "status": "failed", "error": e }),
+                    )
+                    .ok();
+            }
+        }
+    });
 
     Ok(())
 }

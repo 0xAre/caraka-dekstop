@@ -228,8 +228,19 @@ pub async fn send_dm(
         return Err("Pesan terlalu panjang (max 4096 karakter)".to_string());
     }
 
-    let state_opt = state.lock().await;
-    let state = require_state(&state_opt)?;
+    // SECURITY 3B: lepas outer lock setelah ekstrak Arc-Arc, sebelum komputasi kriptografi
+    let (db_conn, peer_senders, my_priv_bytes, my_node_id_arr, node_id_hex, router) = {
+        let state_opt = state.lock().await;
+        let st = require_state(&state_opt)?;
+        (
+            st.db_conn.clone(),
+            st.peer_senders.clone(),
+            st.my_private_key.0,
+            st.my_node_id.0,
+            st.node_id_hex.clone(),
+            st.router.clone(),
+        )
+    };
 
     // 1. Parse recipient Node ID
     let recipient_bytes = hex::decode(&recipient_id)
@@ -237,29 +248,31 @@ pub async fn send_dm(
     let peer_public: [u8; 32] = recipient_bytes
         .try_into()
         .map_err(|_| "Recipient ID harus 32 byte (64 hex chars)".to_string())?;
-    let peer_id = crate::keys::NodePublicKey(peer_public);
+    let peer_id   = crate::keys::NodePublicKey(peer_public);
+    let my_priv   = crate::keys::NodePrivateKey(my_priv_bytes);
+    let my_pub    = crate::keys::NodePublicKey(my_node_id_arr);
 
     // 2. Ambil atau buat session info
     let (session_id, msg_counter) = {
-        let db = state.db_conn.lock().await;
+        let db = db_conn.lock().await;
         crate::store::get_or_create_session(&db, &recipient_id)
             .map_err(|e| e.to_string())?
     };
 
     // 3. ECDH → shared secret
-    let shared_secret = crate::keys::ecdh(&state.my_private_key, &peer_id);
+    let shared_secret = crate::keys::ecdh(&my_priv, &peer_id);
 
     // 4. Derive DM-Key
     let aead_key = crate::keys::derive_dm_key(
         &shared_secret,
-        &state.my_node_id,
+        &my_pub,
         &peer_id,
         &session_id,
         msg_counter,
     );
 
     // 5. Generate Packet ID
-    let packet_id = ClampPacket::generate_packet_id(&state.my_node_id.0);
+    let packet_id = ClampPacket::generate_packet_id(&my_node_id_arr);
 
     // 6. Build inner payload
     let now = std::time::SystemTime::now()
@@ -268,7 +281,7 @@ pub async fn send_dm(
         .as_secs();
 
     let inner = crate::packet::DmInnerPayload {
-        sender_id: state.node_id_hex.clone(),
+        sender_id: node_id_hex.clone(),
         recipient_id: recipient_id.clone(),
         text: plaintext.clone(),
         timestamp: now,
@@ -305,8 +318,8 @@ pub async fn send_dm(
 
     // 9. Hitung Hop-MAC
     let hop_mac = {
-        let router = state.router.lock().await;
-        router.compute_origin_mac(&ClampPacket {
+        let router_guard = router.lock().await;
+        router_guard.compute_origin_mac(&ClampPacket {
             header: header.clone(),
             hop_auth: HopAuth { hop_counter: 0, mac_tag: [0u8; 16] },
             nonce: nonce.0,
@@ -329,7 +342,7 @@ pub async fn send_dm(
     let stored_msg = StoredMessage {
         id: msg_uuid.clone(),
         packet_id: hex::encode(packet_id),
-        sender_id: state.node_id_hex.clone(),
+        sender_id: node_id_hex.clone(),
         recipient_id: recipient_id.clone(),
         nonce: nonce.0.to_vec(),
         ciphertext: ciphertext.clone(),
@@ -339,24 +352,24 @@ pub async fn send_dm(
     };
 
     {
-        let db = state.db_conn.lock().await;
+        let db = db_conn.lock().await;
         crate::store::save_message(&db, &stored_msg).map_err(|e| e.to_string())?;
     }
 
     // 12. Increment message counter
     {
-        let db = state.db_conn.lock().await;
+        let db = db_conn.lock().await;
         crate::store::increment_msg_counter(&db, &recipient_id).map_err(|e| e.to_string())?;
     }
 
     // 13. Register di router
     {
-        let mut router = state.router.lock().await;
-        router.register_outgoing(&full_packet);
+        let mut router_guard = router.lock().await;
+        router_guard.register_outgoing(&full_packet);
     }
 
     // 14. Broadcast ke semua peer
-    crate::transport::broadcast_packet(&full_packet, &state.peer_senders).await;
+    crate::transport::broadcast_packet(&full_packet, &peer_senders).await;
 
     // 15. Emit event ke UI
     app_handle
@@ -377,7 +390,9 @@ pub async fn send_dm(
     Ok(hex::encode(packet_id))
 }
 
-/// Dekripsi paket yang masuk (dipanggil dari event handler frontend).
+/// Dekripsi paket DM yang masuk (dipanggil dari event handler frontend).
+///
+/// SECURITY 3B: lock AppState hanya untuk ekstrak Arc, lalu lepas sebelum loop dekripsi.
 #[tauri::command]
 pub async fn try_decrypt_packet(
     packet_id: String,
@@ -386,8 +401,14 @@ pub async fn try_decrypt_packet(
     aead_tag_hex: String,
     state: SharedState<'_>,
 ) -> Result<Option<MessageInfo>, String> {
-    let state_opt = state.lock().await;
-    let state = require_state(&state_opt)?;
+    let (db_conn, my_priv_bytes, my_node_id_arr) = {
+        let state_opt = state.lock().await;
+        let st = require_state(&state_opt)?;
+        (st.db_conn.clone(), st.my_private_key.0, st.my_node_id.0)
+    };
+
+    let my_priv    = crate::keys::NodePrivateKey(my_priv_bytes);
+    let my_node_id = crate::keys::NodePublicKey(my_node_id_arr);
 
     let packet_id_bytes = hex::decode(&packet_id)
         .map_err(|_| "Packet ID hex invalid".to_string())?;
@@ -417,7 +438,7 @@ pub async fn try_decrypt_packet(
     aad[5..13].copy_from_slice(&packet_id_arr);
 
     let peers = {
-        let db = state.db_conn.lock().await;
+        let db = db_conn.lock().await;
         crate::store::get_all_peers(&db).map_err(|e| e.to_string())?
     };
 
@@ -425,10 +446,10 @@ pub async fn try_decrypt_packet(
         if let Ok(peer_bytes) = hex::decode(&peer.node_id) {
             if let Ok(arr) = peer_bytes.try_into() {
                 let peer_pub = crate::keys::NodePublicKey(arr);
-                let shared = crate::keys::ecdh(&state.my_private_key, &peer_pub);
+                let shared = crate::keys::ecdh(&my_priv, &peer_pub);
 
                 let (session_id, stored_counter) = {
-                    let db = state.db_conn.lock().await;
+                    let db = db_conn.lock().await;
                     crate::store::get_or_create_session(&db, &peer.node_id)
                         .unwrap_or(([0u8; 8], 0))
                 };
@@ -440,7 +461,7 @@ pub async fn try_decrypt_packet(
                     let aead_key = crate::keys::derive_dm_key(
                         &shared,
                         &peer_pub,
-                        &state.my_node_id,
+                        &my_node_id,
                         &session_id,
                         counter,
                     );
@@ -488,7 +509,7 @@ pub async fn try_decrypt_packet(
                                 delivered: true,
                             };
                             {
-                                let db = state.db_conn.lock().await;
+                                let db = db_conn.lock().await;
                                 let _ = crate::store::save_message(&db, &stored_msg);
                             }
 
@@ -514,19 +535,30 @@ pub async fn try_decrypt_packet(
 }
 
 /// Ambil daftar pesan dengan peer tertentu.
+///
+/// SECURITY 3B: lock AppState hanya untuk ekstrak Arc-Arc, lalu lepas sebelum loop dekripsi.
 #[tauri::command]
 pub async fn get_messages(
     peer_id: String,
     limit: Option<usize>,
     state: SharedState<'_>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let state_opt = state.lock().await;
-    let state = require_state(&state_opt)?;
     let limit = limit.unwrap_or(50).min(200);
 
+    // Ekstrak field yang dibutuhkan, lepas outer lock segera
+    let (db_conn, my_priv_bytes, node_id_hex) = {
+        let state_opt = state.lock().await;
+        let st = require_state(&state_opt)?;
+        (
+            st.db_conn.clone(),
+            st.my_private_key.0,
+            st.node_id_hex.clone(),
+        )
+    };
+
     let messages = {
-        let db = state.db_conn.lock().await;
-        crate::store::get_messages_between(&db, &state.node_id_hex, &peer_id, limit)
+        let db = db_conn.lock().await;
+        crate::store::get_messages_between(&db, &node_id_hex, &peer_id, limit)
             .map_err(|e| e.to_string())?
     };
 
@@ -536,11 +568,14 @@ pub async fn get_messages(
         .try_into()
         .map_err(|_| "Peer ID harus 32 byte".to_string())?;
     let peer_pub = crate::keys::NodePublicKey(peer_pub_arr);
-    let shared = crate::keys::ecdh(&state.my_private_key, &peer_pub);
+    let my_priv  = crate::keys::NodePrivateKey(my_priv_bytes);
+    let shared   = crate::keys::ecdh(&my_priv, &peer_pub);
+
+    let my_pub_for_derive = crate::keys::public_key_from_private(&crate::keys::NodePrivateKey(my_priv_bytes));
 
     let mut result = Vec::new();
     for msg in messages {
-        let is_outgoing = msg.sender_id == state.node_id_hex;
+        let is_outgoing = msg.sender_id == node_id_hex;
 
         if let (Ok(nonce_arr), Ok(tag_arr)) = (
             msg.nonce.clone().try_into().map_err(|_: Vec<u8>| ()),
@@ -550,7 +585,7 @@ pub async fn get_messages(
             let tag_arr: [u8; 16] = tag_arr;
 
             let (session_id, stored_counter) = {
-                let db = state.db_conn.lock().await;
+                let db = db_conn.lock().await;
                 crate::store::get_or_create_session(&db, &peer_id).unwrap_or(([0u8; 8], 0))
             };
 
@@ -584,7 +619,7 @@ pub async fn get_messages(
                 let aead_key = if is_outgoing {
                     crate::keys::derive_dm_key(
                         &shared,
-                        &state.my_node_id,
+                        &my_pub_for_derive,
                         &peer_pub,
                         &session_id,
                         counter,
@@ -593,7 +628,7 @@ pub async fn get_messages(
                     crate::keys::derive_dm_key(
                         &shared,
                         &peer_pub,
-                        &state.my_node_id,
+                        &my_pub_for_derive,
                         &session_id,
                         counter,
                     )
@@ -1029,6 +1064,417 @@ pub async fn scan_emergency_network(
     }
 
     Ok(found_ips)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// F0 — Tor Transport
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Kembalikan alamat .onion node ini, atau None jika Tor belum bootstrap.
+#[tauri::command]
+pub async fn get_onion_address(state: SharedState<'_>) -> Result<Option<String>, String> {
+    let state_opt = state.lock().await;
+    let st = require_state(&state_opt)?;
+    let tor = st.tor_ctx.lock().await;
+    Ok(tor.as_ref().map(|ctx| ctx.onion_address.clone()))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// F6 — Text Invite Code + Onion Address Sharing
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Hasilkan kode undangan base64url yang berisi Node ID + alamat (LAN atau onion).
+///
+/// Format raw sebelum encode:
+///   caraka0:<nodeId>:<localIp>:<tcpPort>     — via LAN
+///   caraka1:<nodeId>:<onionAddress>:<torPort> — via Tor
+#[tauri::command]
+pub async fn generate_invite_code(state: SharedState<'_>) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let (node_id, tor_addr) = {
+        let state_opt = state.lock().await;
+        let st = require_state(&state_opt)?;
+        let tor = st.tor_ctx.lock().await;
+        let tor_addr = tor.as_ref().map(|ctx| ctx.onion_address.clone());
+        (st.node_id_hex.clone(), tor_addr)
+    };
+
+    let raw = if let Some(onion) = tor_addr {
+        format!(
+            "caraka1:{}:{}:{}",
+            node_id,
+            onion,
+            crate::tor::TOR_VIRTUAL_PORT
+        )
+    } else {
+        let local_ip = get_local_ip()
+            .await
+            .unwrap_or_else(|_| "unknown".to_string());
+        format!(
+            "caraka0:{}:{}:{}",
+            node_id,
+            local_ip,
+            crate::transport::DATA_PORT
+        )
+    };
+
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes()))
+}
+
+/// Parse kode undangan dan kembalikan JSON dengan info koneksi.
+#[tauri::command]
+pub async fn parse_invite_code(code: String) -> Result<serde_json::Value, String> {
+    use base64::Engine as _;
+
+    let decoded_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(code.trim())
+        .map_err(|_| "Kode undangan tidak valid (bukan base64url)".to_string())?;
+    let s = String::from_utf8(decoded_bytes)
+        .map_err(|_| "Kode undangan tidak valid (encoding)".to_string())?;
+
+    let parts: Vec<&str> = s.splitn(4, ':').collect();
+    match parts.as_slice() {
+        ["caraka0", node_id, ip, port] => Ok(serde_json::json!({
+            "nodeId":  node_id,
+            "ip":      ip,
+            "port":    port.parse::<u16>().unwrap_or(crate::transport::DATA_PORT),
+            "via":     "lan"
+        })),
+        ["caraka1", node_id, onion, port] => Ok(serde_json::json!({
+            "nodeId":        node_id,
+            "onionAddress":  onion,
+            "port":          port.parse::<u16>().unwrap_or(crate::tor::TOR_VIRTUAL_PORT),
+            "via":           "tor"
+        })),
+        _ => Err("Format kode undangan tidak dikenali".to_string()),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// F2 — File Transfer
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Kirim file ke peer tertentu via jalur E2EE yang sama dengan DM.
+/// Batasan: 5 MB per file.
+#[tauri::command]
+pub async fn send_file(
+    recipient_id: String,
+    file_path: String,
+    app_handle: tauri::AppHandle,
+    state: SharedState<'_>,
+) -> Result<String, String> {
+    // 1. Baca file + validasi ukuran
+    let (file_bytes, filename, mime_type) =
+        crate::file_transfer::read_file_for_transfer(&file_path)?;
+
+    let file_size = file_bytes.len() as u64;
+
+    // 2. Ambil state yang dibutuhkan, lepas lock sesegera mungkin (SECURITY 3B)
+    let (db_conn, peer_senders, my_priv_bytes, node_id_hex, my_node_id_arr, router, hop_mac_key) = {
+        let state_opt = state.lock().await;
+        let st = require_state(&state_opt)?;
+        (
+            st.db_conn.clone(),
+            st.peer_senders.clone(),
+            st.my_private_key.0,
+            st.node_id_hex.clone(),
+            st.my_node_id.0,
+            st.router.clone(),
+            st.hop_mac_key,
+        )
+    };
+
+    let recipient_bytes = hex::decode(&recipient_id)
+        .map_err(|_| "Recipient ID tidak valid".to_string())?;
+    let peer_pub_arr: [u8; 32] = recipient_bytes
+        .try_into()
+        .map_err(|_| "Recipient ID harus 32 byte".to_string())?;
+    let peer_id = crate::keys::NodePublicKey(peer_pub_arr);
+    let my_priv = crate::keys::NodePrivateKey(my_priv_bytes);
+    let my_node_id = crate::keys::NodePublicKey(my_node_id_arr);
+
+    // 3. Session + counter
+    let (session_id, msg_counter) = {
+        let db = db_conn.lock().await;
+        crate::store::get_or_create_session(&db, &recipient_id)
+            .map_err(|e| e.to_string())?
+    };
+
+    // 4. ECDH → shared secret → AEAD key
+    let shared_secret = crate::keys::ecdh(&my_priv, &peer_id);
+    let aead_key = crate::keys::derive_dm_key(
+        &shared_secret,
+        &my_node_id,
+        &peer_id,
+        &session_id,
+        msg_counter,
+    );
+
+    // 5. Build payload
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let transfer_id = uuid::Uuid::new_v4().to_string();
+    let file_data_b64 = base64::engine::general_purpose::STANDARD.encode(&file_bytes);
+
+    let payload = crate::packet::FilePayload {
+        sender_id: node_id_hex.clone(),
+        recipient_id: recipient_id.clone(),
+        transfer_id: transfer_id.clone(),
+        filename: filename.clone(),
+        mime_type: mime_type.clone(),
+        file_size,
+        file_data_b64,
+        timestamp: now,
+        session_id: hex::encode(session_id),
+        msg_counter,
+    };
+    let payload_json = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+
+    // 6. Build header
+    let packet_id = ClampPacket::generate_packet_id(&my_node_id_arr);
+    let header = ClampHeader {
+        magic: MAGIC,
+        version: PROTOCOL_VERSION,
+        packet_type: PacketType::File,
+        ttl: TTL_MAX,
+        packet_id,
+    };
+
+    let temp_pkt = ClampPacket {
+        header: header.clone(),
+        hop_auth: HopAuth { hop_counter: 0, mac_tag: [0u8; 16] },
+        nonce: [0u8; 16],
+        ciphertext: vec![],
+        aead_tag: [0u8; 16],
+    };
+    let aad = temp_pkt.header_bytes();
+
+    // 7. Enkripsi
+    let nonce = crate::crypto::generate_nonce();
+    let (ciphertext, aead_tag) = crate::crypto::encrypt(&aead_key, &nonce, &payload_json, &aad)
+        .map_err(|e| e.to_string())?;
+
+    // 8. Hop-MAC
+    let hop_mac = {
+        let router_guard = router.lock().await;
+        let _ = hop_mac_key; // digunakan di router internal
+        router_guard.compute_origin_mac(&ClampPacket {
+            header: header.clone(),
+            hop_auth: HopAuth { hop_counter: 0, mac_tag: [0u8; 16] },
+            nonce: nonce.0,
+            ciphertext: ciphertext.clone(),
+            aead_tag,
+        })
+    };
+
+    // 9. Build paket lengkap
+    let full_pkt = ClampPacket {
+        header,
+        hop_auth: HopAuth { hop_counter: 0, mac_tag: hop_mac },
+        nonce: nonce.0,
+        ciphertext: ciphertext.clone(),
+        aead_tag,
+    };
+
+    // 10. Increment counter
+    {
+        let db = db_conn.lock().await;
+        crate::store::increment_msg_counter(&db, &recipient_id).map_err(|e| e.to_string())?;
+    }
+
+    // 11. Register + broadcast
+    {
+        let mut router_guard = router.lock().await;
+        router_guard.register_outgoing(&full_pkt);
+    }
+    crate::transport::broadcast_packet(&full_pkt, &peer_senders).await;
+
+    // 12. Notify UI
+    app_handle
+        .emit(
+            "file_sent",
+            serde_json::json!({
+                "transferId":  transfer_id,
+                "recipientId": recipient_id,
+                "filename":    filename,
+                "mimeType":    mime_type,
+                "fileSize":    file_size,
+                "timestamp":   now,
+            }),
+        )
+        .ok();
+
+    Ok(transfer_id)
+}
+
+/// Dekripsi paket File yang masuk dan simpan ke folder Downloads/CARAKA/.
+/// Dipanggil dari frontend saat menerima `clamp_packet_received` dengan packetType = 0x08.
+#[tauri::command]
+pub async fn try_decrypt_file_packet(
+    packet_id: String,
+    nonce_hex: String,
+    ciphertext_hex: String,
+    aead_tag_hex: String,
+    app_handle: tauri::AppHandle,
+    state: SharedState<'_>,
+) -> Result<Option<serde_json::Value>, String> {
+    // Ambil state lalu lepas lock (SECURITY 3B)
+    let (db_conn, my_priv_bytes, my_node_id_arr) = {
+        let state_opt = state.lock().await;
+        let st = require_state(&state_opt)?;
+        (
+            st.db_conn.clone(),
+            st.my_private_key.0,
+            st.my_node_id.0,
+        )
+    };
+
+    let my_priv = crate::keys::NodePrivateKey(my_priv_bytes);
+    let my_node_id = crate::keys::NodePublicKey(my_node_id_arr);
+
+    let packet_id_bytes = hex::decode(&packet_id)
+        .map_err(|_| "Packet ID hex invalid".to_string())?;
+    let packet_id_arr: [u8; 8] = packet_id_bytes
+        .try_into()
+        .map_err(|_| "Packet ID harus 8 byte".to_string())?;
+
+    let nonce_bytes = hex::decode(&nonce_hex)
+        .map_err(|_| "Nonce hex invalid".to_string())?;
+    let ciphertext = hex::decode(&ciphertext_hex)
+        .map_err(|_| "Ciphertext hex invalid".to_string())?;
+    let aead_tag_bytes = hex::decode(&aead_tag_hex)
+        .map_err(|_| "AEAD tag hex invalid".to_string())?;
+
+    let nonce: [u8; 16] = nonce_bytes
+        .try_into()
+        .map_err(|_| "Nonce harus 16 byte".to_string())?;
+    let aead_tag: [u8; 16] = aead_tag_bytes
+        .try_into()
+        .map_err(|_| "AEAD tag harus 16 byte".to_string())?;
+
+    // AAD untuk File packet type
+    let mut aad = [0u8; crate::packet::HEADER_SIZE];
+    aad[0..2].copy_from_slice(&MAGIC);
+    aad[2] = PROTOCOL_VERSION;
+    aad[3] = PacketType::File as u8;
+    aad[4] = TTL_MAX;
+    aad[5..13].copy_from_slice(&packet_id_arr);
+
+    let peers = {
+        let db = db_conn.lock().await;
+        crate::store::get_all_peers(&db).map_err(|e| e.to_string())?
+    };
+
+    for peer in &peers {
+        if let Ok(peer_bytes) = hex::decode(&peer.node_id) {
+            if let Ok(arr) = peer_bytes.try_into() {
+                let peer_pub = crate::keys::NodePublicKey(arr);
+                let shared = crate::keys::ecdh(&my_priv, &peer_pub);
+
+                let (session_id, stored_counter) = {
+                    let db = db_conn.lock().await;
+                    crate::store::get_or_create_session(&db, &peer.node_id)
+                        .unwrap_or(([0u8; 8], 0))
+                };
+
+                for counter in stored_counter.saturating_sub(5)..stored_counter + 50 {
+                    let aead_key = crate::keys::derive_dm_key(
+                        &shared,
+                        &peer_pub,
+                        &my_node_id,
+                        &session_id,
+                        counter,
+                    );
+
+                    if let Ok(plain) = crate::crypto::decrypt(
+                        &aead_key,
+                        &crate::crypto::Nonce(nonce),
+                        &ciphertext,
+                        &aead_tag,
+                        &aad,
+                    ) {
+                        if let Ok(fp) =
+                            serde_json::from_slice::<crate::packet::FilePayload>(&plain)
+                        {
+                            // Dekode base64 → bytes
+                            let file_bytes = base64::engine::general_purpose::STANDARD
+                                .decode(&fp.file_data_b64)
+                                .map_err(|e| format!("Gagal decode base64 file: {e}"))?;
+
+                            // Simpan ke disk
+                            let saved_path = crate::file_transfer::save_received_file(
+                                &app_handle,
+                                &fp.filename,
+                                &file_bytes,
+                            )?;
+
+                            let path_str = saved_path.to_string_lossy().to_string();
+                            let is_image =
+                                crate::file_transfer::is_previewable_image(&fp.mime_type);
+
+                            app_handle
+                                .emit(
+                                    "file_received",
+                                    serde_json::json!({
+                                        "transferId":  fp.transfer_id,
+                                        "senderId":    fp.sender_id,
+                                        "filename":    fp.filename,
+                                        "mimeType":    fp.mime_type,
+                                        "fileSize":    fp.file_size,
+                                        "savedPath":   path_str,
+                                        "isImage":     is_image,
+                                        "timestamp":   fp.timestamp,
+                                    }),
+                                )
+                                .ok();
+
+                            return Ok(Some(serde_json::json!({
+                                "transferId":  fp.transfer_id,
+                                "senderId":    fp.sender_id,
+                                "filename":    fp.filename,
+                                "mimeType":    fp.mime_type,
+                                "fileSize":    fp.file_size,
+                                "savedPath":   path_str,
+                                "isImage":     is_image,
+                                "timestamp":   fp.timestamp,
+                            })));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RELEASE 5D — Auto-Updater
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Cek pembaruan tersedia via GitHub Releases.
+/// Return JSON: { available, version?, body? }
+#[tauri::command]
+pub async fn check_for_updates(app_handle: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = app_handle
+        .updater()
+        .map_err(|e| format!("Updater tidak tersedia: {e}"))?;
+
+    match updater.check().await {
+        Ok(Some(update)) => Ok(serde_json::json!({
+            "available": true,
+            "version":   update.version,
+            "body":      update.body.unwrap_or_default()
+        })),
+        Ok(None) => Ok(serde_json::json!({ "available": false })),
+        Err(e)   => Err(format!("Gagal cek update: {e}")),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

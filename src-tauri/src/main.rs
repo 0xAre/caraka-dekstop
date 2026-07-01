@@ -12,6 +12,7 @@
 pub mod commands;
 pub mod crypto;
 pub mod discovery;
+pub mod file_transfer;
 pub mod hotspot;
 pub mod keys;
 pub mod network_monitor;
@@ -20,6 +21,7 @@ pub mod routing;
 pub mod state;
 pub mod store;
 pub mod sync;
+pub mod tor;
 pub mod transport;
 pub mod vault;
 
@@ -41,6 +43,7 @@ async fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let app_handle = app.handle().clone();
 
@@ -87,6 +90,15 @@ async fn main() {
             // ─── QR & Safety ──────────────────────────────────────────
             commands::generate_peer_qr,
             commands::compute_safety_number,
+            // ─── Tor / Invite (F0 + F6) ───────────────────────────────
+            commands::get_onion_address,
+            commands::generate_invite_code,
+            commands::parse_invite_code,
+            // ─── File Transfer (F2) ───────────────────────────────────
+            commands::send_file,
+            commands::try_decrypt_file_packet,
+            // ─── Updater (RELEASE 5D) ─────────────────────────────────
+            commands::check_for_updates,
         ])
         .run(tauri::generate_context!())
         .expect("error saat menjalankan CARAKA Desktop");

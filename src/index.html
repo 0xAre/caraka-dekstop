@@ -375,6 +375,9 @@
             </svg>
           </button>
         </div>
+        <button class="invite-code-btn" id="invite-code-btn" title="Bagikan kode undangan">
+          &#x1F517; Kode Undangan
+        </button>
       </div>
     </aside>
 
@@ -445,6 +448,18 @@
               <div class="info-card-label">Dikenal</div>
               <div class="info-card-value large" id="card-peers-known">0</div>
             </div>
+            <div class="info-card" id="card-onion" style="display:none;">
+              <div class="info-card-label">Onion Address</div>
+              <div class="info-card-value mono" id="card-onion-addr" style="font-size:9px;word-break:break-all;">&#x2014;</div>
+              <div class="info-card-actions">
+                <button class="btn-icon btn-small" id="copy-onion-btn" title="Salin .onion address">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <rect x="4" y="4" width="9" height="9" rx="1.5"/>
+                    <path d="M3 11H2a1 1 0 01-1-1V2a1 1 0 011-1h8a1 1 0 011 1v1"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
           </div>
 
           <!-- Status Strip -->
@@ -461,6 +476,13 @@
               <div class="status-chip-text">
                 <div class="status-chip-label">Jaringan</div>
                 <div class="status-chip-value" id="status-network-type">Mesh P2P</div>
+              </div>
+            </div>
+            <div class="status-chip" id="tor-status-chip">
+              <div class="status-chip-icon" id="tor-status-icon" style="background:linear-gradient(135deg,#6b46c1,#553c9a);font-size:14px;">&#x1F9C5;</div>
+              <div class="status-chip-text">
+                <div class="status-chip-label">Tor</div>
+                <div class="status-chip-value" id="tor-status-text">Memulai...</div>
               </div>
             </div>
             <div class="status-chip">
@@ -640,6 +662,12 @@
 
           <div class="msg-input-bar">
             <div class="msg-input-wrap">
+              <button class="attach-btn" id="attach-btn" title="Kirim file (maks 5 MB)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px">
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+                </svg>
+              </button>
+              <input type="file" id="file-input" style="display:none" />
               <textarea
                 class="msg-textarea"
                 id="msg-input"
@@ -659,7 +687,7 @@
             </div>
             <div class="input-footer">
               <span>&#x1F512; Terenkripsi end-to-end</span>
-              <span>Ctrl+Enter untuk kirim</span>
+              <span>Ctrl+Enter kirim &nbsp;&#x2022;&nbsp; &#x1F4CE; file maks 5 MB</span>
             </div>
           </div>
         </div>
@@ -763,6 +791,36 @@
       <div class="modal-footer">
         <button class="btn-secondary" id="cancel-settings">Batal</button>
         <button class="btn-primary" id="save-settings">Simpan</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Invite Code -->
+  <div class="modal-overlay hidden" id="modal-invite">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>&#x1F517; Kode Undangan</h3>
+        <button class="btn-icon" id="close-invite-modal">&#x2715;</button>
+      </div>
+      <div class="modal-body">
+        <div class="invite-section">
+          <div class="invite-label">Bagikan kode ini agar peer bisa terhubung langsung:</div>
+          <div class="invite-code-box" id="invite-code-display">&#x23F3; Membuat kode...</div>
+          <div class="invite-via-badge" id="invite-via-badge"></div>
+          <div class="invite-actions">
+            <button class="btn-primary btn-small" id="copy-invite-btn">&#x1F4CB; Salin Kode</button>
+          </div>
+        </div>
+        <div class="invite-divider">&#x2015;&ensp;atau tempel kode undangan&ensp;&#x2015;</div>
+        <div class="form-group">
+          <label class="form-label">Kode dari peer lain</label>
+          <input type="text" class="form-input" id="paste-invite-input" placeholder="Tempel kode undangan di sini..." />
+        </div>
+        <div class="invite-parse-result hidden" id="invite-parse-result"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="cancel-invite">Tutup</button>
+        <button class="btn-primary" id="connect-from-invite">Hubungkan</button>
       </div>
     </div>
   </div>
