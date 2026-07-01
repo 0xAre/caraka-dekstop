@@ -16,7 +16,6 @@ GEMINI.md
 # Tauri & Rust
 src-tauri/target/
 src-tauri/target2/
-src-tauri/Cargo.lock
 
 # App Database & Secrets (CRITICAL: Do not commit!)
 *.db
