@@ -1079,6 +1079,27 @@ pub async fn get_onion_address(state: SharedState<'_>) -> Result<Option<String>,
     Ok(tor.as_ref().map(|ctx| ctx.onion_address.clone()))
 }
 
+/// Kembalikan status Tor saat ini: "bootstrapping" | "ready" | "failed" | "unavailable"
+/// Digunakan frontend untuk sync status setelah listener terdaftar.
+#[tauri::command]
+pub async fn get_tor_status(
+    state: SharedState<'_>,
+) -> Result<serde_json::Value, String> {
+    let state_opt = state.lock().await;
+    if require_state(&state_opt).is_err() {
+        return Ok(serde_json::json!({ "status": "unavailable" }));
+    }
+    let st = state_opt.as_ref().unwrap();
+    let tor = st.tor_ctx.lock().await;
+    match tor.as_ref() {
+        Some(ctx) => Ok(serde_json::json!({
+            "status": "ready",
+            "onionAddress": ctx.onion_address
+        })),
+        None => Ok(serde_json::json!({ "status": "bootstrapping" })),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // F6 — Text Invite Code + Onion Address Sharing
 // ═══════════════════════════════════════════════════════════════════════════

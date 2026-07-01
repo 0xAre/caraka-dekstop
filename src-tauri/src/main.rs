@@ -92,6 +92,7 @@ async fn main() {
             commands::compute_safety_number,
             // ─── Tor / Invite (F0 + F6) ───────────────────────────────
             commands::get_onion_address,
+            commands::get_tor_status,
             commands::generate_invite_code,
             commands::parse_invite_code,
             // ─── File Transfer (F2) ───────────────────────────────────

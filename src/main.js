@@ -2383,6 +2383,13 @@ async function setupFileEventListeners() {
     updateTorStatusChip(d.status, d.onionAddress || d.error || null);
   });
 
+  // Sync status Tor segera setelah listener terdaftar —
+  // event "bootstrapping" mungkin sudah lewat sebelum listener aktif.
+  try {
+    const torNow = await ipc('get_tor_status');
+    if (torNow) updateTorStatusChip(torNow.status, torNow.onionAddress || torNow.error || null);
+  } catch (_) { /* node belum siap, tidak masalah */ }
+
   // Tangani packet tipe File dari transport
   const origHandleIncomingPacket = window._origHandleIncomingPacket || handleIncomingPacket;
   window._carakaHandlePacket = async function(d) {
