@@ -84,7 +84,77 @@
 
 
   <!-- ======================================================================
-       VIEW 2: ONBOARDING
+       VIEW 2: VAULT — BUAT PASSWORD (First Run)
+       ====================================================================== -->
+  <div id="view-vault-create" class="view">
+    <div class="vault-card">
+      <div class="vault-icon">
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+          <rect x="8" y="20" width="32" height="24" rx="4" stroke="#20C9D8" stroke-width="2"/>
+          <path d="M16 20V14a8 8 0 0116 0v6" stroke="#20C9D8" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="24" cy="32" r="3" fill="#20C9D8"/>
+          <path d="M24 35v4" stroke="#20C9D8" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div class="vault-title">Buat Password</div>
+      <div class="vault-desc">
+        Password melindungi identitas kriptografi Anda. Minimal 8 karakter.
+        <strong>Tidak bisa direset</strong> — simpan baik-baik.
+      </div>
+
+      <div class="vault-form">
+        <div class="vault-field">
+          <input type="password" id="vc-pass" class="form-input" placeholder="Password baru (min. 8 karakter)" autocomplete="new-password" />
+          <button type="button" class="vault-eye" data-target="vc-pass" title="Tampilkan / sembunyikan">&#x1F441;</button>
+        </div>
+        <div class="vault-field">
+          <input type="password" id="vc-confirm" class="form-input" placeholder="Konfirmasi password" autocomplete="new-password" />
+          <button type="button" class="vault-eye" data-target="vc-confirm" title="Tampilkan / sembunyikan">&#x1F441;</button>
+        </div>
+        <div class="vault-strength" id="vc-strength"></div>
+        <div class="vault-error hidden" id="vc-error"></div>
+        <button class="btn-primary vault-btn" id="vc-submit">
+          <span id="vc-btn-text">Buat &amp; Masuk</span>
+          <span id="vc-spinner" class="hidden">&#x23F3; Menyiapkan...</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ======================================================================
+       VIEW 3: VAULT — MASUKKAN PASSWORD (Returning User)
+       ====================================================================== -->
+  <div id="view-vault-unlock" class="view">
+    <div class="vault-card">
+      <div class="vault-icon">
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+          <rect x="8" y="20" width="32" height="24" rx="4" stroke="#20C9D8" stroke-width="2"/>
+          <path d="M16 20V14a8 8 0 0116 0v6" stroke="#4A9EBF" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 2"/>
+          <circle cx="24" cy="32" r="3" fill="#20C9D8"/>
+          <path d="M24 35v4" stroke="#20C9D8" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div class="vault-title">Selamat Datang</div>
+      <div class="vault-desc">Masukkan password untuk membuka CARAKA.</div>
+
+      <div class="vault-form">
+        <div class="vault-field">
+          <input type="password" id="vu-pass" class="form-input" placeholder="Password" autocomplete="current-password" autofocus />
+          <button type="button" class="vault-eye" data-target="vu-pass" title="Tampilkan / sembunyikan">&#x1F441;</button>
+        </div>
+        <div class="vault-error hidden" id="vu-error"></div>
+        <button class="btn-primary vault-btn" id="vu-submit">
+          <span id="vu-btn-text">Buka</span>
+          <span id="vu-spinner" class="hidden">&#x23F3; Membuka...</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ======================================================================
+       VIEW 4: ONBOARDING
        ====================================================================== -->
   <div id="view-onboarding" class="view">
     <div class="onboarding-card">
@@ -556,6 +626,16 @@
 
           <div id="messages-area">
             <div id="messages-scroll"></div>
+          </div>
+
+          <!-- Reply Bar (muncul saat user klik pesan untuk dibalas) -->
+          <div class="reply-bar hidden" id="reply-bar">
+            <div class="reply-bar-icon">&#x21A9;</div>
+            <div class="reply-bar-content">
+              <div class="reply-bar-label">Membalas</div>
+              <div class="reply-bar-text" id="reply-bar-text"></div>
+            </div>
+            <button class="reply-bar-cancel" id="reply-bar-cancel" title="Batal balas">&#x2715;</button>
           </div>
 
           <div class="msg-input-bar">

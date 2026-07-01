@@ -56,6 +56,9 @@ const state = {
   // Current view/panel
   currentPanel: 'home',
 
+  // Reply state — { id, text } | null
+  replyTo: null,
+
   // Seen broadcast message IDs (deduplikasi di UI)
   seenBroadcasts: new Set(),
 };
@@ -1123,11 +1126,13 @@ async function setupEventListeners() {
   // Pesan DM terkirim
   await on('message_sent', (event) => {
     const d = event.payload;
-    // BUG #2 FIX: Backend emits recipientId (camelCase), bukan recipientNodeId
     appendMessage(d.recipientId, {
-      text:      d.text,
-      timestamp: d.timestamp,
-      outgoing:  true,
+      id:          d.id,
+      text:        d.text,
+      timestamp:   d.timestamp,
+      outgoing:    true,
+      replyToId:   d.replyToId   || null,
+      replyToText: d.replyToText || null,
     });
   });
 
@@ -1180,15 +1185,18 @@ async function handleIncomingPacket(d) {
     if (result && result.plaintext) {
       const senderId = result.senderId || d.packetId;
       appendMessage(senderId, {
-        text:      result.plaintext,
-        timestamp: result.timestamp || Math.floor(Date.now() / 1000),
-        outgoing:  false,
+        id:          result.id,
+        text:        result.plaintext,
+        timestamp:   result.timestamp || Math.floor(Date.now() / 1000),
+        outgoing:    false,
+        replyToId:   result.replyToId   || null,
+        replyToText: result.replyToText || null,
       });
       // Notif pesan masuk
       const sender = state.peers.get(senderId);
       const senderName = sender?.displayName || senderId?.substring(0, 8) || 'Unknown';
       const shortText = result.plaintext.length > 40 ? result.plaintext.substring(0, 40) + '...' : result.plaintext;
-      pushNotif('msg', '💬', `<strong>${senderName}</strong>: ${shortText}`);
+      pushNotif('msg', '💬', `<strong>${escapeHtml(senderName)}</strong>: ${escapeHtml(shortText)}`);
     }
   } catch (err) {
     console.warn('[CARAKA] Gagal dekripsi packet:', err);
@@ -1197,103 +1205,230 @@ async function handleIncomingPacket(d) {
 
 // ── 14. App Initialization ────────────────────────────────────────────────
 
-async function initApp() {
-  console.log('[CARAKA] Memulai inisialisasi...');
+// ── Vault Screens (F1) ─────────────────────────────────────────────────────
+
+function showVaultCreate() {
+  const splash = document.getElementById('view-splash');
+  if (splash) { splash.style.opacity = '0'; splash.classList.remove('active'); }
+  const vc = document.getElementById('view-vault-create');
+  if (vc) { vc.classList.add('active'); vc.style.display = ''; }
+  document.getElementById('vc-pass')?.focus();
+}
+
+function showVaultUnlock() {
+  const splash = document.getElementById('view-splash');
+  if (splash) { splash.style.opacity = '0'; splash.classList.remove('active'); }
+  const vu = document.getElementById('view-vault-unlock');
+  if (vu) { vu.classList.add('active'); vu.style.display = ''; }
+  document.getElementById('vu-pass')?.focus();
+}
+
+function hideVaultScreens() {
+  ['view-vault-create', 'view-vault-unlock'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('active');
+  });
+}
+
+function vaultStrength(pass) {
+  if (!pass) return { label: '', cls: '' };
+  if (pass.length < 8) return { label: 'Terlalu pendek', cls: 'weak' };
+  let score = 0;
+  if (/[A-Z]/.test(pass)) score++;
+  if (/[0-9]/.test(pass)) score++;
+  if (/[^A-Za-z0-9]/.test(pass)) score++;
+  if (pass.length >= 12) score++;
+  if (score <= 1) return { label: 'Lemah', cls: 'weak' };
+  if (score === 2) return { label: 'Sedang', cls: 'medium' };
+  return { label: 'Kuat', cls: 'strong' };
+}
+
+function setupVaultScreens() {
+  // Eye toggle — show/hide password
+  document.querySelectorAll('.vault-eye').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const inp = document.getElementById(btn.dataset.target);
+      if (!inp) return;
+      inp.type = inp.type === 'password' ? 'text' : 'password';
+    });
+  });
+
+  // Password strength indicator (create screen)
+  const vcPass = document.getElementById('vc-pass');
+  const vcStrength = document.getElementById('vc-strength');
+  vcPass?.addEventListener('input', () => {
+    if (!vcStrength) return;
+    const s = vaultStrength(vcPass.value);
+    vcStrength.textContent = s.label;
+    vcStrength.className = 'vault-strength ' + s.cls;
+  });
+
+  // Create vault submit
+  const vcSubmit = document.getElementById('vc-submit');
+  const vcError = document.getElementById('vc-error');
+  vcSubmit?.addEventListener('click', async () => {
+    const pass = document.getElementById('vc-pass')?.value || '';
+    const confirm = document.getElementById('vc-confirm')?.value || '';
+    if (vcError) vcError.classList.add('hidden');
+
+    if (pass.length < 8) {
+      if (vcError) { vcError.textContent = 'Password minimal 8 karakter.'; vcError.classList.remove('hidden'); }
+      return;
+    }
+    if (pass !== confirm) {
+      if (vcError) { vcError.textContent = 'Password tidak cocok. Coba lagi.'; vcError.classList.remove('hidden'); }
+      return;
+    }
+
+    const btnText = document.getElementById('vc-btn-text');
+    const spinner = document.getElementById('vc-spinner');
+    if (btnText) btnText.classList.add('hidden');
+    if (spinner) spinner.classList.remove('hidden');
+    vcSubmit.disabled = true;
+
+    try {
+      await ipc('create_vault', { passphrase: pass });
+      hideVaultScreens();
+      await proceedAfterVault();
+    } catch (err) {
+      if (vcError) { vcError.textContent = String(err); vcError.classList.remove('hidden'); }
+    } finally {
+      if (btnText) btnText.classList.remove('hidden');
+      if (spinner) spinner.classList.add('hidden');
+      vcSubmit.disabled = false;
+    }
+  });
+
+  // Enter key on create form
+  document.getElementById('vc-confirm')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') vcSubmit?.click();
+  });
+  document.getElementById('vc-pass')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('vc-confirm')?.focus();
+  });
+
+  // Unlock vault submit
+  const vuSubmit = document.getElementById('vu-submit');
+  const vuError = document.getElementById('vu-error');
+  vuSubmit?.addEventListener('click', async () => {
+    const pass = document.getElementById('vu-pass')?.value || '';
+    if (vuError) vuError.classList.add('hidden');
+
+    if (!pass) {
+      if (vuError) { vuError.textContent = 'Masukkan password.'; vuError.classList.remove('hidden'); }
+      return;
+    }
+
+    const btnText = document.getElementById('vu-btn-text');
+    const spinner = document.getElementById('vu-spinner');
+    if (btnText) btnText.classList.add('hidden');
+    if (spinner) spinner.classList.remove('hidden');
+    vuSubmit.disabled = true;
+
+    try {
+      await ipc('unlock_vault', { passphrase: pass });
+      hideVaultScreens();
+      await proceedAfterVault();
+    } catch (err) {
+      if (vuError) { vuError.textContent = String(err); vuError.classList.remove('hidden'); }
+      document.getElementById('vu-pass')?.select();
+    } finally {
+      if (btnText) btnText.classList.remove('hidden');
+      if (spinner) spinner.classList.add('hidden');
+      vuSubmit.disabled = false;
+    }
+  });
+
+  // Enter key on unlock form
+  document.getElementById('vu-pass')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') vuSubmit?.click();
+  });
+}
+
+/** Dipanggil setelah vault berhasil dibuka — lanjutkan init node */
+async function proceedAfterVault() {
   const statusEl = document.getElementById('splash-status');
 
-  // Animated status messages
-  const statusMessages = [
-    'Memuat kriptografi...',
-    'Menginisialisasi node...',
-    'Membuka database...',
-    'Mengaktifkan transport...',
-    'Memulai discovery...',
-    'Node siap!',
-  ];
-  let msgIdx = 0;
-  const statusInterval = setInterval(() => {
-    if (statusEl && msgIdx < statusMessages.length - 1) {
-      msgIdx++;
-      statusEl.textContent = statusMessages[msgIdx];
-    } else {
-      clearInterval(statusInterval);
-    }
-  }, 400);
+  // Tampilkan splash lagi sebentar sambil init
+  const splash = document.getElementById('view-splash');
+  if (splash) {
+    splash.style.opacity = '1';
+    splash.classList.add('active');
+  }
+  if (statusEl) statusEl.textContent = 'Menginisialisasi node...';
 
   try {
-    // Setup event listeners (opsional — jika gagal app tetap jalan)
-    try { await setupEventListeners(); } catch(evErr) {
-      console.warn('[CARAKA] Event listeners gagal:', evErr);
-    }
-
-    // Init node
     const nodeData = await ipc('init_node');
     console.log('[CARAKA] Node ready:', nodeData.nodeId?.substring(0, 8));
 
-    // Simpan state
     state.myNodeId      = nodeData.nodeId || '';
     state.myNodeIdShort = nodeData.nodeId ? nodeData.nodeId.substring(0, 16) + '...' : '';
     state.myName        = nodeData.displayName || 'User';
     state.myFingerprint = nodeData.fingerprint || '';
 
-    // Ambil IP lokal
-    try {
-      state.myLocalIp = await ipc('get_local_ip');
-    } catch {
-      state.myLocalIp = 'Tidak diketahui';
-    }
+    try { state.myLocalIp = await ipc('get_local_ip'); } catch { state.myLocalIp = 'Tidak diketahui'; }
 
-    clearInterval(statusInterval);
     if (statusEl) statusEl.textContent = 'Node siap!';
 
-    // Load existing peers dari DB
     try {
       const peers = await ipc('get_peers');
       peers.forEach(p => {
-        // Field names sekarang camelCase karena #[serde(rename_all = "camelCase")]
-        const nodeId = p.nodeId || p.node_id;
+        const nodeId      = p.nodeId || p.node_id;
         const displayName = p.displayName || p.display_name || nodeId?.substring(0, 8) || '?';
-        const ip = p.ipAddress || p.ip_address || p.ip || '';
-        const port = p.tcpPort || p.tcp_port || 7771;
-
+        const ip          = p.ipAddress || p.ip_address || p.ip || '';
+        const port        = p.tcpPort || p.tcp_port || 7771;
         if (nodeId) {
-          state.peers.set(nodeId, {
-            nodeId,
-            displayName,
-            ip,
-            port,
-            status: 'disconnected',
-            fingerprint: p.fingerprint || '',
-          });
+          state.peers.set(nodeId, { nodeId, displayName, ip, port, status: 'disconnected', fingerprint: p.fingerprint || '' });
         }
       });
-    } catch (e) {
-      console.warn('[CARAKA] get_peers error:', e);
-    }
+    } catch (e) { console.warn('[CARAKA] get_peers error:', e); }
 
+    await delay(600);
 
-    // Delay splash sedikit agar animasi terlihat
-    await delay(800);
-
-    // Cek apakah perlu onboarding
     const needsOnboarding = !nodeData.displayName
       || nodeData.displayName === 'User'
       || nodeData.displayName.trim() === '';
 
-    if (needsOnboarding) {
-      showOnboarding(nodeData);
-    } else {
-      showAppView();
-    }
+    if (needsOnboarding) { showOnboarding(nodeData); } else { showAppView(); }
 
   } catch (err) {
-    clearInterval(statusInterval);
-    console.error('[CARAKA] Gagal init:', err);
+    console.error('[CARAKA] proceedAfterVault error:', err);
     if (statusEl) statusEl.textContent = 'Error: ' + err;
-    // Tampilkan error di splash dengan warna merah
     const statusDot = document.querySelector('.splash-status-dot');
     if (statusDot) { statusDot.style.background = '#d94f4f'; statusDot.style.animation = 'none'; }
     setTimeout(() => showToast('Gagal memulai node: ' + err, 'error', 10000), 500);
+  }
+}
+
+async function initApp() {
+  console.log('[CARAKA] Memulai inisialisasi...');
+  const statusEl = document.getElementById('splash-status');
+  if (statusEl) statusEl.textContent = 'Memeriksa keamanan...';
+
+  // Setup vault UI handlers sekali saja
+  setupVaultScreens();
+
+  // Setup background event listeners (tidak butuh state)
+  try { await setupEventListeners(); } catch(evErr) {
+    console.warn('[CARAKA] Event listeners gagal:', evErr);
+  }
+
+  // Cek apakah vault sudah ada
+  try {
+    if (statusEl) statusEl.textContent = 'Memuat vault...';
+    const vaultExists = await ipc('check_vault_exists');
+
+    await delay(400); // beri waktu splash tampil sebentar
+
+    if (vaultExists) {
+      showVaultUnlock();
+    } else {
+      showVaultCreate();
+    }
+  } catch (err) {
+    console.error('[CARAKA] Vault check error:', err);
+    // Fallback: tampilkan vault create (safe default)
+    showVaultCreate();
   }
 }
 
@@ -1502,9 +1637,17 @@ function setupChatInput() {
       e.preventDefault();
       if (!sendBtn.disabled) sendMessage();
     }
+    // Escape → batal reply
+    if (e.key === 'Escape' && state.replyTo) {
+      e.preventDefault();
+      clearReplyTo();
+    }
   });
 
   sendBtn.addEventListener('click', sendMessage);
+
+  // Cancel reply button
+  document.getElementById('reply-bar-cancel')?.addEventListener('click', clearReplyTo);
 }
 
 async function sendMessage() {
@@ -1523,20 +1666,38 @@ async function sendMessage() {
   document.getElementById('msg-char-count').textContent = '0';
   document.getElementById('send-btn').disabled = true;
 
+  const currentReply = state.replyTo;
+  clearReplyTo();
+
   try {
-    // BUG #2 FIX: Rust command send_dm expects recipient_id dan plaintext
-    // Tauri auto-convert: recipientId → recipient_id, plaintext → plaintext
     await ipc('send_dm', {
       recipientId: state.activePeerId,
       plaintext: text,
+      replyToId:   currentReply ? currentReply.id   : null,
+      replyToText: currentReply ? currentReply.text : null,
     });
   } catch (err) {
     showToast('Gagal kirim: ' + err, 'error');
-    input.value = text; // Kembalikan teks
+    input.value = text;
+    if (currentReply) setReplyTo(currentReply.id, currentReply.text);
   }
 }
 
 // ── Helper: Messages ───────────────────────────────────────────────────────
+
+function setReplyTo(id, text) {
+  state.replyTo = { id, text };
+  const bar    = document.getElementById('reply-bar');
+  const textEl = document.getElementById('reply-bar-text');
+  if (bar)    bar.classList.remove('hidden');
+  if (textEl) textEl.textContent = text.length > 90 ? text.substring(0, 90) + '…' : text;
+  document.getElementById('msg-input')?.focus();
+}
+
+function clearReplyTo() {
+  state.replyTo = null;
+  document.getElementById('reply-bar')?.classList.add('hidden');
+}
 
 function appendMessage(peerId, msg) {
   if (!state.messages.has(peerId)) state.messages.set(peerId, []);
@@ -1570,7 +1731,7 @@ function renderMessages(peerId) {
 
   let lastDate = '';
 
-  msgs.forEach(msg => {
+  msgs.forEach((msg, idx) => {
     const date = new Date(msg.timestamp * 1000).toLocaleDateString('id-ID');
 
     if (date !== lastDate) {
@@ -1581,17 +1742,49 @@ function renderMessages(peerId) {
       lastDate = date;
     }
 
+    const msgId = msg.id || `${msg.timestamp}_${idx}`;
+
     const wrapper = document.createElement('div');
     wrapper.className = `msg-wrapper ${msg.outgoing ? 'outgoing' : 'incoming'}`;
-    wrapper.innerHTML = `
-      <div class="msg-bubble">
-        <div class="msg-text">${escapeHtml(msg.text)}</div>
-        <div class="msg-meta">
-          <span>${formatTimestamp(msg.timestamp)}</span>
-          <span>🔒</span>
-        </div>
-      </div>
-    `;
+    wrapper.dataset.msgId = msgId;
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+
+    // Quoted block (DOM, bukan innerHTML)
+    if (msg.replyToText) {
+      const quoted = document.createElement('div');
+      quoted.className = 'msg-quoted';
+      const quotedText = document.createElement('div');
+      quotedText.className = 'msg-quoted-text';
+      const preview = msg.replyToText.length > 80
+        ? msg.replyToText.substring(0, 80) + '…'
+        : msg.replyToText;
+      quotedText.textContent = preview;
+      quoted.appendChild(quotedText);
+      bubble.appendChild(quoted);
+    }
+
+    const msgText = document.createElement('div');
+    msgText.className = 'msg-text';
+    msgText.textContent = msg.text;
+
+    const msgMeta = document.createElement('div');
+    msgMeta.className = 'msg-meta';
+    const timeSpan = document.createElement('span');
+    timeSpan.textContent = formatTimestamp(msg.timestamp);
+    const lockSpan = document.createElement('span');
+    lockSpan.textContent = '🔒';
+    msgMeta.appendChild(timeSpan);
+    msgMeta.appendChild(lockSpan);
+
+    bubble.appendChild(msgText);
+    bubble.appendChild(msgMeta);
+
+    // Klik bubble → set sebagai reply target
+    bubble.addEventListener('click', () => setReplyTo(msgId, msg.text));
+
+    wrapper.appendChild(bubble);
     scroll.appendChild(wrapper);
   });
 
