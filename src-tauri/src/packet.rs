@@ -53,6 +53,8 @@ pub enum PacketType {
     /// Broadcast darurat — pesan publik mesh flooding tanpa E2EE
     /// Diteruskan ke semua peer sampai TTL habis atau duplicate
     Broadcast = 0x07,
+    /// File Transfer — transfer file E2EE point-to-point (max 5 MB)
+    File = 0x08,
 }
 
 impl TryFrom<u8> for PacketType {
@@ -66,6 +68,7 @@ impl TryFrom<u8> for PacketType {
             0x05 => Ok(PacketType::Hello),
             0x06 => Ok(PacketType::SyncData),
             0x07 => Ok(PacketType::Broadcast),
+            0x08 => Ok(PacketType::File),
             other => Err(PacketError::UnknownPacketType(other)),
         }
     }
@@ -137,6 +140,24 @@ pub struct DmInnerPayload {
     /// Teks pesan yang dibalas untuk tampilan quote (opsional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_text: Option<String>,
+}
+
+/// Inner payload untuk File Transfer — dienkripsi sama seperti DM
+/// Batasan: file_data_b64 maksimal ~6.7 MB (5 MB raw × 4/3 base64 overhead)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FilePayload {
+    pub sender_id: String,
+    pub recipient_id: String,
+    /// UUID v4 unik untuk sesi transfer ini
+    pub transfer_id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub file_size: u64,
+    /// Konten file di-encode sebagai base64 standard
+    pub file_data_b64: String,
+    pub timestamp: u64,
+    pub session_id: String,
+    pub msg_counter: u64,
 }
 
 /// Payload untuk Broadcast darurat — TIDAK dienkripsi (plaintext mesh flooding)

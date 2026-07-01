@@ -2152,4 +2152,406 @@ document.addEventListener('DOMContentLoaded', () => {
   waitForTauriAndStart();
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// F0 — Tor Status Chip
+// ═══════════════════════════════════════════════════════════════════════════
+
+function updateTorStatusChip(status, onionAddress) {
+  const icon = document.getElementById('tor-status-icon');
+  const text = document.getElementById('tor-status-text');
+  const card = document.getElementById('card-onion');
+  if (!icon || !text) return;
+
+  if (status === 'bootstrapping') {
+    icon.style.background = 'linear-gradient(135deg,#6b46c1,#553c9a)';
+    icon.textContent = '⏳';
+    text.textContent = 'Bootstrap...';
+  } else if (status === 'ready') {
+    icon.style.background = 'linear-gradient(135deg,#7c3aed,#5b21b6)';
+    icon.textContent = '🧅';
+    text.textContent = onionAddress
+      ? onionAddress.substring(0, 16) + '…'
+      : 'Siap';
+    if (onionAddress && card) {
+      card.style.display = '';
+      const addr = document.getElementById('card-onion-addr');
+      if (addr) addr.textContent = onionAddress;
+    }
+    state.onionAddress = onionAddress || null;
+    pushNotif('system', '🧅', `Tor siap — <strong>${onionAddress ? onionAddress.substring(0,20) + '…' : 'onion address aktif'}</strong>`);
+  } else if (status === 'failed') {
+    icon.style.background = 'linear-gradient(135deg,#6b7280,#4b5563)';
+    icon.textContent = '⚠️';
+    text.textContent = 'Gagal';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// F6 — Invite Code Modal
+// ═══════════════════════════════════════════════════════════════════════════
+
+function setupInviteModal() {
+  const openBtn   = document.getElementById('invite-code-btn');
+  const closeBtn  = document.getElementById('close-invite-modal');
+  const cancelBtn = document.getElementById('cancel-invite');
+  const copyBtn   = document.getElementById('copy-invite-btn');
+  const connectBtn = document.getElementById('connect-from-invite');
+  const modal     = document.getElementById('modal-invite');
+  const display   = document.getElementById('invite-code-display');
+  const viaBadge  = document.getElementById('invite-via-badge');
+  const pasteInput = document.getElementById('paste-invite-input');
+  const parseResult = document.getElementById('invite-parse-result');
+
+  if (!openBtn) return;
+
+  openBtn.addEventListener('click', async () => {
+    modal.classList.remove('hidden');
+    display.textContent = '⏳ Membuat kode...';
+    if (viaBadge) viaBadge.textContent = '';
+    if (pasteInput) pasteInput.value = '';
+    if (parseResult) { parseResult.textContent = ''; parseResult.classList.add('hidden'); }
+
+    try {
+      const code = await ipc('generate_invite_code');
+      display.textContent = code;
+      // Decode untuk tampilkan via-type
+      const raw = atob(code.replace(/-/g, '+').replace(/_/g, '/'));
+      if (viaBadge) {
+        viaBadge.textContent = raw.startsWith('caraka1:') ? '🧅 via Tor' : '📡 via LAN';
+        viaBadge.className   = 'invite-via-badge ' + (raw.startsWith('caraka1:') ? 'tor' : 'lan');
+      }
+    } catch (e) {
+      display.textContent = 'Gagal membuat kode: ' + e;
+    }
+  });
+
+  const closeModal = () => modal.classList.add('hidden');
+  closeBtn?.addEventListener('click', closeModal);
+  cancelBtn?.addEventListener('click', closeModal);
+  modal?.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+
+  copyBtn?.addEventListener('click', () => {
+    const code = display.textContent;
+    if (code && !code.startsWith('⏳') && !code.startsWith('Gagal')) {
+      copyText(code, 'Kode undangan disalin!');
+    }
+  });
+
+  // Parse kode yang ditempel
+  pasteInput?.addEventListener('input', async () => {
+    const code = pasteInput.value.trim();
+    if (!code || !parseResult) return;
+
+    try {
+      const info = await ipc('parse_invite_code', { code });
+      parseResult.classList.remove('hidden');
+      parseResult.textContent = '';
+      const span = document.createElement('span');
+      span.className = 'parse-ok';
+      if (info.via === 'tor') {
+        span.textContent = `🧅 Tor — Node: ${escapeHtml(info.nodeId).substring(0, 16)}…`;
+      } else {
+        span.textContent = `📡 LAN — ${escapeHtml(String(info.ip))}:${escapeHtml(String(info.port))} — Node: ${escapeHtml(info.nodeId).substring(0, 16)}…`;
+      }
+      parseResult.appendChild(span);
+      parseResult.dataset.info = JSON.stringify(info);
+    } catch {
+      parseResult.classList.remove('hidden');
+      parseResult.textContent = '';
+      const span = document.createElement('span');
+      span.className = 'parse-err';
+      span.textContent = 'Kode tidak valid';
+      parseResult.appendChild(span);
+      delete parseResult.dataset.info;
+    }
+  });
+
+  connectBtn?.addEventListener('click', async () => {
+    const raw = parseResult?.dataset.info;
+    if (!raw) { showToast('Tempel kode yang valid dulu', 'warning'); return; }
+
+    try {
+      const info = JSON.parse(raw);
+      if (info.via === 'lan') {
+        await ipc('add_peer_manual', { ip: info.ip, port: info.port });
+        showToast(`Menghubungkan ke ${info.ip}:${info.port}…`, 'info');
+      } else {
+        showToast('Koneksi via Tor belum didukung di versi ini', 'warning');
+      }
+      closeModal();
+    } catch (e) {
+      showToast('Gagal connect: ' + e, 'error');
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// F2 — File Transfer UI + F4 — Image Preview
+// ═══════════════════════════════════════════════════════════════════════════
+
+function setupFileAttach() {
+  const attachBtn  = document.getElementById('attach-btn');
+  const fileInput  = document.getElementById('file-input');
+  if (!attachBtn || !fileInput) return;
+
+  attachBtn.addEventListener('click', () => {
+    if (!state.activePeerId) { showToast('Pilih peer dulu', 'warning'); return; }
+    const peer = state.peers.get(state.activePeerId);
+    if (!peer || peer.status !== 'connected') { showToast('Peer belum terhubung', 'warning'); return; }
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    fileInput.value = '';
+
+    const MAX_MB = 5;
+    if (file.size > MAX_MB * 1024 * 1024) {
+      showToast(`File terlalu besar (maks ${MAX_MB} MB)`, 'error');
+      return;
+    }
+
+    showToast(`Mengirim ${file.name}…`, 'info');
+    try {
+      // Tauri path picker tidak tersedia di web — gunakan path dari File object
+      // Di Tauri v2 desktop, window.__TAURI__.path menyediakan pathFrom
+      let filePath = file.path || (window.__TAURI__?.path ? await window.__TAURI__.path.resolve(file.name) : null);
+
+      if (!filePath) {
+        // Fallback: baca sebagai ArrayBuffer dan kirim via virtual path
+        showToast('Kirim file via path tidak tersedia di mode ini', 'warning');
+        return;
+      }
+
+      const transferId = await ipc('send_file', {
+        recipientId: state.activePeerId,
+        filePath,
+      });
+      showToast(`File terkirim: ${file.name}`, 'success');
+    } catch (e) {
+      showToast('Gagal kirim file: ' + e, 'error');
+    }
+  });
+}
+
+// Tambahkan listener file_received & file_sent ke setupEventListeners
+// (dipanggil terpisah agar tidak memodifikasi fungsi yang sudah ada)
+async function setupFileEventListeners() {
+  await on('file_sent', (event) => {
+    const d = event.payload;
+    if (!d) return;
+    const sizeKb = Math.round((d.fileSize || 0) / 1024);
+    appendMessage(d.recipientId, {
+      id:        `file_${d.transferId}`,
+      text:      `📎 ${d.filename} (${sizeKb} KB)`,
+      fileInfo:  d,
+      timestamp: d.timestamp || Math.floor(Date.now() / 1000),
+      outgoing:  true,
+    });
+  });
+
+  await on('file_received', (event) => {
+    const d = event.payload;
+    if (!d) return;
+    const sizeKb = Math.round((d.fileSize || 0) / 1024);
+    appendMessage(d.senderId, {
+      id:        `file_${d.transferId}`,
+      text:      `📎 ${d.filename} (${sizeKb} KB)`,
+      fileInfo:  d,
+      timestamp: d.timestamp || Math.floor(Date.now() / 1000),
+      outgoing:  false,
+    });
+    const sender = state.peers.get(d.senderId);
+    const name   = sender?.displayName || d.senderId?.substring(0, 8) || '?';
+    pushNotif('msg', '📎', `<strong>${escapeHtml(name)}</strong> mengirim file: ${escapeHtml(d.filename)}`);
+    showToast(`File diterima: ${d.filename} → ${d.savedPath}`, 'success', 7000);
+  });
+
+  await on('tor_status', (event) => {
+    const d = event.payload;
+    if (!d) return;
+    updateTorStatusChip(d.status, d.onionAddress || null);
+  });
+
+  // Tangani packet tipe File dari transport
+  const origHandleIncomingPacket = window._origHandleIncomingPacket || handleIncomingPacket;
+  window._carakaHandlePacket = async function(d) {
+    if (d.packetType === 8) {
+      try {
+        await ipc('try_decrypt_file_packet', {
+          packetId:     d.packetId,
+          nonceHex:     d.nonce,
+          ciphertextHex: d.ciphertext,
+          aeadTagHex:   d.aeadTag,
+        });
+      } catch (err) {
+        console.warn('[CARAKA] Gagal dekripsi file packet:', err);
+      }
+    } else {
+      await origHandleIncomingPacket(d);
+    }
+  };
+}
+
+// ── Patch renderMessages untuk F4 Image Preview ─────────────────────────────
+
+const _origRenderMessages = renderMessages;
+function renderMessages(peerId) {
+  const scroll = document.getElementById('messages-scroll');
+  const msgs   = state.messages.get(peerId) || [];
+  const wasAtBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 20;
+
+  scroll.innerHTML = '';
+
+  if (msgs.length === 0) {
+    scroll.innerHTML = `
+      <div class="empty-state" style="padding-top:60px;">
+        <div class="empty-state-icon">🔒</div>
+        <div class="empty-state-text">Belum ada pesan</div>
+        <small>Mulai percakapan terenkripsi pertama Anda</small>
+      </div>`;
+    return;
+  }
+
+  let lastDate = '';
+
+  msgs.forEach((msg, idx) => {
+    const date = new Date(msg.timestamp * 1000).toLocaleDateString('id-ID');
+    if (date !== lastDate) {
+      const sep = document.createElement('div');
+      sep.className = 'date-separator';
+      sep.textContent = date;
+      scroll.appendChild(sep);
+      lastDate = date;
+    }
+
+    const msgId = msg.id || `${msg.timestamp}_${idx}`;
+    const wrapper = document.createElement('div');
+    wrapper.className = `msg-wrapper ${msg.outgoing ? 'outgoing' : 'incoming'}`;
+    wrapper.dataset.msgId = msgId;
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+
+    // Quoted block
+    if (msg.replyToText) {
+      const quoted = document.createElement('div');
+      quoted.className = 'msg-quoted';
+      const quotedText = document.createElement('div');
+      quotedText.className = 'msg-quoted-text';
+      quotedText.textContent = msg.replyToText.length > 80
+        ? msg.replyToText.substring(0, 80) + '…'
+        : msg.replyToText;
+      quoted.appendChild(quotedText);
+      bubble.appendChild(quoted);
+    }
+
+    // F4: Image preview jika fileInfo + isImage
+    if (msg.fileInfo && msg.fileInfo.isImage && msg.fileInfo.savedPath) {
+      const imgWrap = document.createElement('div');
+      imgWrap.className = 'msg-image-wrap';
+      const img = document.createElement('img');
+      // Tauri asset protocol: gunakan convertFileSrc jika tersedia
+      if (window.__TAURI__?.core?.convertFileSrc) {
+        img.src = window.__TAURI__.core.convertFileSrc(msg.fileInfo.savedPath);
+      } else {
+        img.src = 'file://' + msg.fileInfo.savedPath.replace(/\\/g, '/');
+      }
+      img.className = 'msg-image-preview';
+      img.alt = msg.fileInfo.filename || 'gambar';
+      img.loading = 'lazy';
+      imgWrap.appendChild(img);
+      bubble.appendChild(imgWrap);
+    }
+
+    // File attachment bubble (non-image)
+    if (msg.fileInfo && !msg.fileInfo.isImage) {
+      const fileChip = document.createElement('div');
+      fileChip.className = 'msg-file-chip';
+      const fileIcon = document.createElement('span');
+      fileIcon.textContent = '📎';
+      const fileName = document.createElement('span');
+      fileName.className = 'msg-file-name';
+      fileName.textContent = msg.fileInfo.filename || msg.text;
+      const fileSize = document.createElement('span');
+      fileSize.className = 'msg-file-size';
+      fileSize.textContent = msg.fileInfo.fileSize
+        ? Math.round(msg.fileInfo.fileSize / 1024) + ' KB'
+        : '';
+      fileChip.appendChild(fileIcon);
+      fileChip.appendChild(fileName);
+      fileChip.appendChild(fileSize);
+      if (msg.fileInfo.savedPath) {
+        fileChip.title = 'Disimpan: ' + msg.fileInfo.savedPath;
+        fileChip.style.cursor = 'pointer';
+      }
+      bubble.appendChild(fileChip);
+    } else if (!msg.fileInfo) {
+      // Pesan teks biasa
+      const msgText = document.createElement('div');
+      msgText.className = 'msg-text';
+      msgText.textContent = msg.text;
+      bubble.appendChild(msgText);
+    } else if (msg.fileInfo && msg.fileInfo.isImage) {
+      // Untuk gambar, tampilkan nama file sebagai caption kecil
+      const cap = document.createElement('div');
+      cap.className = 'msg-image-caption';
+      cap.textContent = msg.fileInfo.filename || '';
+      bubble.appendChild(cap);
+    }
+
+    const msgMeta = document.createElement('div');
+    msgMeta.className = 'msg-meta';
+    const timeSpan = document.createElement('span');
+    timeSpan.textContent = formatTimestamp(msg.timestamp);
+    const lockSpan = document.createElement('span');
+    lockSpan.textContent = '🔒';
+    msgMeta.appendChild(timeSpan);
+    msgMeta.appendChild(lockSpan);
+    bubble.appendChild(msgMeta);
+
+    bubble.addEventListener('click', () => {
+      if (!msg.fileInfo) setReplyTo(msgId, msg.text);
+    });
+
+    wrapper.appendChild(bubble);
+    scroll.appendChild(wrapper);
+  });
+
+  if (wasAtBottom) scroll.scrollTop = scroll.scrollHeight;
+}
+
+// Override handleIncomingPacket agar mendukung file packet
+const _origHandleIncomingPacket = handleIncomingPacket;
+async function handleIncomingPacket(d) {
+  if (d.packetType === 8) {
+    try {
+      await ipc('try_decrypt_file_packet', {
+        packetId:      d.packetId,
+        nonceHex:      d.nonce,
+        ciphertextHex: d.ciphertext,
+        aeadTagHex:    d.aeadTag,
+      });
+    } catch (err) {
+      console.warn('[CARAKA] Gagal dekripsi file packet:', err);
+    }
+  } else {
+    await _origHandleIncomingPacket(d);
+  }
+}
+
+// Hook tambahan ke showAppView untuk setup fitur baru
+const _origShowAppView = showAppView;
+function showAppView() {
+  _origShowAppView();
+  setupInviteModal();
+  setupFileAttach();
+  setupFileEventListeners().catch(e => console.warn('file/tor listeners:', e));
+  // Setup copy onion button
+  document.getElementById('copy-onion-btn')?.addEventListener('click', () => {
+    if (state.onionAddress) copyText(state.onionAddress, 'Onion address disalin');
+  });
+}
+
 })(); // end IIFE
