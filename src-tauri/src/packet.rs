@@ -131,6 +131,12 @@ pub struct DmInnerPayload {
     pub session_id: String,
     /// Message counter untuk key derivation
     pub msg_counter: u64,
+    /// ID pesan yang dibalas (opsional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to_id: Option<String>,
+    /// Teks pesan yang dibalas untuk tampilan quote (opsional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to_text: Option<String>,
 }
 
 /// Payload untuk Broadcast darurat — TIDAK dienkripsi (plaintext mesh flooding)
