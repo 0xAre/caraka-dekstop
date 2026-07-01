@@ -467,12 +467,7 @@ async fn process_incoming_packet(
     let decision = {
         if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
             if let Ok(state) = state_arc.try_lock() {
-                let mut router = state.router.try_lock().ok();
-                if let Some(ref mut r) = router {
-                    Some(r.handle_incoming(&mut pkt, &source))
-                } else {
-                    None
-                }
+                state.router.try_lock().ok().as_mut().map(|r| r.handle_incoming(&mut pkt, &source))
             } else {
                 None
             }

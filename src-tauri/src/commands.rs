@@ -481,7 +481,7 @@ pub async fn try_decrypt_packet(
                             let sender_bytes = hex::decode(&inner.sender_id)
                                 .ok()
                                 .and_then(|b| b.try_into().ok())
-                                .map(|arr| crate::keys::NodePublicKey(arr));
+                                .map(crate::keys::NodePublicKey);
 
                             let sender_fp = sender_bytes
                                 .as_ref()

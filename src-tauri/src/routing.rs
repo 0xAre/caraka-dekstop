@@ -172,15 +172,15 @@ impl Router {
 
         // 3. Validasi Hop-MAC
         // Untuk Hello packets, skip MAC verification (plaintext handshake)
-        if packet.header.packet_type != crate::packet::PacketType::Hello {
-            if !self.verify_hop_mac(packet, source) {
-                self.update_trust(source, TRUST_INVALID_MAC_DELTA);
-                tracing::warn!(
-                    "Hop-MAC invalid dari peer {:?} — trust diturunkan",
-                    &source.0[0..4]
-                );
-                return RoutingDecision::Drop(DropReason::InvalidHopMac);
-            }
+        if packet.header.packet_type != crate::packet::PacketType::Hello
+            && !self.verify_hop_mac(packet, source)
+        {
+            self.update_trust(source, TRUST_INVALID_MAC_DELTA);
+            tracing::warn!(
+                "Hop-MAC invalid dari peer {:?} — trust diturunkan",
+                &source.0[0..4]
+            );
+            return RoutingDecision::Drop(DropReason::InvalidHopMac);
         }
 
         // 4. Tambah ke packet cache (setelah validasi)
