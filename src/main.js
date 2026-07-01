@@ -1476,6 +1476,12 @@ function showAppView() {
   setupEmergencyMode();
   updateUptime();
   setupNotifFeed();
+  setupInviteModal();
+  setupFileAttach();
+  setupFileEventListeners().catch(e => console.warn('file/tor listeners:', e));
+  document.getElementById('copy-onion-btn')?.addEventListener('click', () => {
+    if (state.onionAddress) copyText(state.onionAddress, 'Onion address disalin');
+  });
 }
 
 function updateAllNameDisplays() {
@@ -2539,19 +2545,6 @@ async function handleIncomingPacket(d) {
   } else {
     await _origHandleIncomingPacket(d);
   }
-}
-
-// Hook tambahan ke showAppView untuk setup fitur baru
-const _origShowAppView = showAppView;
-function showAppView() {
-  _origShowAppView();
-  setupInviteModal();
-  setupFileAttach();
-  setupFileEventListeners().catch(e => console.warn('file/tor listeners:', e));
-  // Setup copy onion button
-  document.getElementById('copy-onion-btn')?.addEventListener('click', () => {
-    if (state.onionAddress) copyText(state.onionAddress, 'Onion address disalin');
-  });
 }
 
 })(); // end IIFE
