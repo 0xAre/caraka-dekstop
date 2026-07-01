@@ -216,8 +216,14 @@ pub async fn complete_initialize(
             .emit("tor_status", serde_json::json!({ "status": "bootstrapping" }))
             .ok();
 
-        match crate::tor::TorContext::launch(&cache_dir, &state_dir).await {
-            Ok(ctx) => {
+        let launch_result = tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            crate::tor::TorContext::launch(&cache_dir, &state_dir),
+        )
+        .await;
+
+        match launch_result {
+            Ok(Ok(ctx)) => {
                 let onion = ctx.onion_address.clone();
                 *tor_ctx.lock().await = Some(ctx);
                 tracing::info!("Tor siap → {}", onion);
@@ -228,12 +234,24 @@ pub async fn complete_initialize(
                     )
                     .ok();
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!("Tor bootstrap gagal: {}", e);
                 tor_handle
                     .emit(
                         "tor_status",
                         serde_json::json!({ "status": "failed", "error": e }),
+                    )
+                    .ok();
+            }
+            Err(_) => {
+                tracing::warn!("Tor bootstrap timeout (180 detik) — kemungkinan firewall memblokir");
+                tor_handle
+                    .emit(
+                        "tor_status",
+                        serde_json::json!({
+                            "status": "failed",
+                            "error": "Timeout: koneksi Tor diblokir firewall atau jaringan tidak mendukung"
+                        }),
                     )
                     .ok();
             }

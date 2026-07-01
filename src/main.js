@@ -2186,9 +2186,12 @@ function updateTorStatusChip(status, onionAddress) {
     state.onionAddress = onionAddress || null;
     pushNotif('system', '🧅', `Tor siap — <strong>${onionAddress ? onionAddress.substring(0,20) + '…' : 'onion address aktif'}</strong>`);
   } else if (status === 'failed') {
-    icon.style.background = 'linear-gradient(135deg,#6b7280,#4b5563)';
-    icon.textContent = '⚠️';
-    text.textContent = 'Gagal';
+    icon.style.background = 'linear-gradient(135deg,#991b1b,#7f1d1d)';
+    icon.textContent = '✕';
+    text.textContent = 'Tor gagal';
+    const chip = document.getElementById('tor-status-chip');
+    if (chip) chip.title = onionAddress || 'Periksa firewall / koneksi internet';
+    pushNotif('system', '⚠️', 'Tor gagal — fitur mesh via internet tidak tersedia. Pesan LAN tetap berjalan.');
   }
 }
 
@@ -2377,7 +2380,7 @@ async function setupFileEventListeners() {
   await on('tor_status', (event) => {
     const d = event.payload;
     if (!d) return;
-    updateTorStatusChip(d.status, d.onionAddress || null);
+    updateTorStatusChip(d.status, d.onionAddress || d.error || null);
   });
 
   // Tangani packet tipe File dari transport
