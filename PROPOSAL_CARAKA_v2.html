@@ -1,0 +1,1912 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CARAKA Desktop — Proposal v2 (2026)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+
+<style>
+/* ══════════════════════════════════════════════════════════
+   ROOT DESIGN TOKENS
+   ══════════════════════════════════════════════════════════ */
+:root {
+  --bg:           #0a0d16;
+  --bg-card:      #111827;
+  --bg-card2:     #161f33;
+  --border:       rgba(99,102,241,0.18);
+  --border-light: rgba(255,255,255,0.07);
+  --accent1:      #6366f1;   /* indigo */
+  --accent2:      #38bdf8;   /* sky    */
+  --accent3:      #34d399;   /* emerald*/
+  --accent4:      #fb923c;   /* orange */
+  --accent5:      #f472b6;   /* pink   */
+  --text:         #f1f5f9;
+  --text-muted:   #94a3b8;
+  --text-dim:     #64748b;
+  --gold:         #f5c518;
+  --red:          #ef4444;
+  --yellow:       #facc15;
+  --green:        #4ade80;
+  --shadow:       0 4px 32px rgba(0,0,0,0.5);
+  --radius:       12px;
+  --radius-lg:    18px;
+  --font-body:    'Inter', system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', monospace;
+}
+
+/* ══════════════════════════════════════════════════════════
+   RESET & BASE
+   ══════════════════════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font-body);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.75;
+  font-size: 15px;
+  print-color-adjust: exact;
+  -webkit-print-color-adjust: exact;
+}
+
+/* ══════════════════════════════════════════════════════════
+   PRINT OVERRIDES
+   ══════════════════════════════════════════════════════════ */
+@media print {
+  body { background: #fff; color: #111; font-size: 11pt; }
+  .no-print { display: none !important; }
+  .page-break { page-break-before: always; }
+  .card, .box, .note-box, .warn-box { border: 1px solid #ccc !important; background: #f9f9f9 !important; }
+  th { background: #334 !important; color: #fff !important; }
+  a { color: #333; }
+  pre, code { border: 1px solid #ddd; }
+}
+
+/* ══════════════════════════════════════════════════════════
+   LAYOUT SKELETON
+   ══════════════════════════════════════════════════════════ */
+.page-wrap {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 24px 80px;
+}
+
+/* ══════════════════════════════════════════════════════════
+   COVER PAGE
+   ══════════════════════════════════════════════════════════ */
+.cover {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  position: relative;
+  padding: 60px 24px;
+  overflow: hidden;
+}
+
+.cover::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 70% 55% at 50% -10%, rgba(99,102,241,0.35) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 40% at 80% 110%, rgba(56,189,248,0.2) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.cover-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(99,102,241,0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(99,102,241,0.05) 1px, transparent 1px);
+  background-size: 48px 48px;
+  pointer-events: none;
+}
+
+.logo-wrap {
+  width: 96px; height: 96px;
+  border-radius: 24px;
+  background: linear-gradient(135deg, var(--accent1), var(--accent2));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 48px;
+  margin: 0 auto 28px;
+  box-shadow: 0 8px 40px rgba(99,102,241,0.4), 0 0 0 1px rgba(255,255,255,0.1);
+  position: relative; z-index: 1;
+}
+
+.cover-badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: rgba(99,102,241,0.15);
+  border: 1px solid rgba(99,102,241,0.35);
+  border-radius: 100px;
+  padding: 6px 18px;
+  font-size: 12px;
+  color: var(--accent2);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 24px;
+  position: relative; z-index: 1;
+}
+
+.cover-title {
+  font-size: clamp(2.2rem, 5vw, 3.5rem);
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  background: linear-gradient(135deg, #fff 20%, var(--accent2) 60%, var(--accent1) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 8px;
+  position: relative; z-index: 1;
+}
+
+.cover-subtitle {
+  font-size: 1.05rem;
+  color: var(--text-muted);
+  max-width: 680px;
+  margin: 0 auto 40px;
+  position: relative; z-index: 1;
+  font-style: italic;
+}
+
+.cover-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  max-width: 720px;
+  width: 100%;
+  margin: 0 auto 40px;
+  position: relative; z-index: 1;
+}
+
+.meta-item {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  padding: 14px 20px;
+  text-align: left;
+}
+
+.meta-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 4px;
+}
+
+.meta-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.cover-chips {
+  display: flex; flex-wrap: wrap; gap: 10px; justify-content: center;
+  position: relative; z-index: 1;
+}
+
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--border-light);
+  border-radius: 100px;
+  padding: 5px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.chip.accent { border-color: rgba(99,102,241,0.4); color: var(--accent1); background: rgba(99,102,241,0.08); }
+.chip.green  { border-color: rgba(52,211,153,0.4); color: var(--accent3); background: rgba(52,211,153,0.08); }
+.chip.sky    { border-color: rgba(56,189,248,0.4); color: var(--accent2); background: rgba(56,189,248,0.08); }
+
+/* ══════════════════════════════════════════════════════════
+   SECTION HEADERS
+   ══════════════════════════════════════════════════════════ */
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 64px 0 32px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.section-icon {
+  width: 44px; height: 44px;
+  border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.si-indigo { background: rgba(99,102,241,0.15); border: 1px solid rgba(99,102,241,0.3); }
+.si-sky    { background: rgba(56,189,248,0.12); border: 1px solid rgba(56,189,248,0.3); }
+.si-green  { background: rgba(52,211,153,0.12); border: 1px solid rgba(52,211,153,0.3); }
+.si-orange { background: rgba(251,146,60,0.12);  border: 1px solid rgba(251,146,60,0.3); }
+.si-pink   { background: rgba(244,114,182,0.12); border: 1px solid rgba(244,114,182,0.3); }
+.si-gold   { background: rgba(245,197,24,0.12);  border: 1px solid rgba(245,197,24,0.3); }
+
+.section-num {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+
+.section-title {
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+.subsection {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--accent2);
+  margin: 36px 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.subsection::before {
+  content: '';
+  display: block;
+  width: 4px; height: 18px;
+  background: var(--accent1);
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.subsubsection {
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: var(--text);
+  margin: 24px 0 10px;
+}
+
+/* ══════════════════════════════════════════════════════════
+   CARDS & BOXES
+   ══════════════════════════════════════════════════════════ */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 28px 32px;
+  margin: 20px 0;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin: 20px 0;
+}
+
+.feature-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+  transition: border-color 0.2s;
+}
+
+.feature-card:hover { border-color: var(--accent1); }
+
+.feature-icon {
+  font-size: 28px;
+  margin-bottom: 10px;
+}
+
+.feature-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.feature-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.note-box {
+  background: rgba(56,189,248,0.06);
+  border: 1px solid rgba(56,189,248,0.25);
+  border-left: 3px solid var(--accent2);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  margin: 16px 0;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.warn-box {
+  background: rgba(251,146,60,0.06);
+  border: 1px solid rgba(251,146,60,0.25);
+  border-left: 3px solid var(--accent4);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  margin: 16px 0;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.gap-box {
+  background: rgba(99,102,241,0.07);
+  border: 1px solid rgba(99,102,241,0.25);
+  border-left: 4px solid var(--accent1);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin: 20px 0;
+}
+
+.gap-box .gap-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent1);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 8px;
+}
+
+/* ══════════════════════════════════════════════════════════
+   TABLES
+   ══════════════════════════════════════════════════════════ */
+.table-wrap {
+  overflow-x: auto;
+  margin: 20px 0;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+th {
+  background: rgba(99,102,241,0.18);
+  color: var(--text);
+  font-weight: 700;
+  padding: 12px 16px;
+  text-align: left;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+td {
+  padding: 11px 16px;
+  border-top: 1px solid var(--border-light);
+  color: var(--text-muted);
+  vertical-align: top;
+}
+
+tr:hover td { background: rgba(255,255,255,0.02); }
+
+td:first-child { color: var(--text); font-weight: 500; }
+
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 10px;
+  border-radius: 100px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.badge-green  { background: rgba(52,211,153,0.15); color: var(--accent3); }
+.badge-red    { background: rgba(239,68,68,0.15);  color: var(--red); }
+.badge-yellow { background: rgba(250,204,21,0.15); color: var(--yellow); }
+.badge-indigo { background: rgba(99,102,241,0.15); color: var(--accent1); }
+.badge-sky    { background: rgba(56,189,248,0.15);  color: var(--accent2); }
+.badge-muted  { background: rgba(148,163,184,0.1);  color: var(--text-dim); }
+
+/* ══════════════════════════════════════════════════════════
+   CODE BLOCKS
+   ══════════════════════════════════════════════════════════ */
+pre {
+  background: #0d1117;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  overflow-x: auto;
+  margin: 16px 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: #c9d1d9;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: rgba(99,102,241,0.1);
+  border: 1px solid rgba(99,102,241,0.2);
+  border-radius: 5px;
+  padding: 2px 7px;
+  color: var(--accent2);
+}
+
+pre code {
+  background: none; border: none; padding: 0; font-size: inherit; color: inherit;
+}
+
+/* ══════════════════════════════════════════════════════════
+   MERMAID DIAGRAMS
+   ══════════════════════════════════════════════════════════ */
+.mermaid-wrap {
+  background: #0d1117;
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: var(--radius-lg);
+  padding: 28px 20px;
+  margin: 20px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+}
+
+.mermaid-wrap .mermaid {
+  max-width: 100%;
+}
+
+.diagram-caption {
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: -8px;
+  margin-bottom: 20px;
+  font-style: italic;
+}
+
+/* ══════════════════════════════════════════════════════════
+   ROADMAP TIMELINE
+   ══════════════════════════════════════════════════════════ */
+.timeline {
+  position: relative;
+  padding-left: 36px;
+  margin: 20px 0;
+}
+
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 14px; top: 0; bottom: 0;
+  width: 2px;
+  background: linear-gradient(180deg, var(--accent1), var(--accent2), var(--accent3));
+  border-radius: 2px;
+}
+
+.tl-item {
+  position: relative;
+  margin-bottom: 28px;
+}
+
+.tl-dot {
+  position: absolute;
+  left: -29px; top: 4px;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--bg);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.tl-dot.done   { background: var(--accent3); border-color: var(--bg); }
+.tl-dot.active { background: var(--accent1); border-color: rgba(99,102,241,0.4); box-shadow: 0 0 10px rgba(99,102,241,0.5); }
+.tl-dot.todo   { background: var(--bg-card); border-color: var(--text-dim); }
+
+.tl-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 2px;
+}
+
+.tl-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
+.tl-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ══════════════════════════════════════════════════════════
+   STAT GRID
+   ══════════════════════════════════════════════════════════ */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+  margin: 24px 0;
+}
+
+.stat-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  text-align: center;
+}
+
+.stat-value {
+  font-size: 2rem;
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  margin-bottom: 6px;
+}
+
+.stat-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* ══════════════════════════════════════════════════════════
+   LIST STYLES
+   ══════════════════════════════════════════════════════════ */
+ul, ol {
+  padding-left: 24px;
+  margin: 12px 0;
+}
+
+li { margin-bottom: 6px; color: var(--text-muted); }
+li strong { color: var(--text); }
+
+p { margin-bottom: 14px; color: var(--text-muted); }
+p strong { color: var(--text); }
+
+/* ══════════════════════════════════════════════════════════
+   SIGNATURE / IDENTITAS
+   ══════════════════════════════════════════════════════════ */
+.id-table {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 20px 0;
+}
+
+@media (max-width: 600px) {
+  .id-table { grid-template-columns: 1fr; }
+  .cover-meta { grid-template-columns: 1fr; }
+}
+
+.id-row {
+  display: flex;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+}
+
+.id-key {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  min-width: 140px;
+  flex-shrink: 0;
+}
+
+.id-val {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* ══════════════════════════════════════════════════════════
+   FOOTER
+   ══════════════════════════════════════════════════════════ */
+.doc-footer {
+  margin-top: 80px;
+  padding: 28px 0;
+  border-top: 1px solid var(--border);
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* ══════════════════════════════════════════════════════════
+   DIVIDER
+   ══════════════════════════════════════════════════════════ */
+.divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border), transparent);
+  margin: 48px 0;
+}
+
+/* ══════════════════════════════════════════════════════════
+   BREADCRUMB NAV
+   ══════════════════════════════════════════════════════════ */
+.toc {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 28px 32px;
+  margin: 40px 0;
+}
+
+.toc-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 18px;
+}
+
+.toc ol {
+  counter-reset: toc;
+  list-style: none;
+  padding: 0;
+  columns: 2;
+  gap: 8px;
+}
+
+@media (max-width: 700px) { .toc ol { columns: 1; } }
+
+.toc li {
+  counter-increment: toc;
+  margin-bottom: 8px;
+}
+
+.toc a {
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 13.5px;
+  display: flex;
+  gap: 10px;
+}
+
+.toc a:hover { color: var(--accent2); }
+.toc a::before { content: counter(toc, upper-roman); color: var(--text-dim); font-size: 11px; min-width: 22px; font-weight: 600; }
+
+/* ══════════════════════════════════════════════════════════
+   CONTRIBUTION PILLARS
+   ══════════════════════════════════════════════════════════ */
+.pillar-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+  margin: 24px 0;
+}
+
+.pillar {
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: 22px 24px;
+  border: 1px solid var(--border-light);
+  position: relative;
+  overflow: hidden;
+}
+
+.pillar::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+}
+
+.pillar-1::before { background: linear-gradient(90deg, var(--accent1), var(--accent2)); }
+.pillar-2::before { background: linear-gradient(90deg, var(--accent2), var(--accent3)); }
+.pillar-3::before { background: linear-gradient(90deg, var(--accent3), var(--accent4)); }
+
+.pillar-num {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 8px;
+}
+
+.pillar-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+
+.pillar-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.65;
+}
+</style>
+</head>
+
+<body>
+<!-- ════════════════════════════════════════════════
+     COVER PAGE
+     ════════════════════════════════════════════════ -->
+<div class="cover">
+  <div class="cover-grid"></div>
+
+  <div class="logo-wrap">🔐</div>
+
+  <div class="cover-badge">⚡ Proposal Proyek Implementasi Kriptografi</div>
+
+  <h1 class="cover-title">CARAKA Desktop</h1>
+  <p class="cover-subtitle">
+    <em>Cryptographically Authenticated Relay Architecture for Knowledge and Autonomy</em><br/>
+    Perancangan &amp; Implementasi Protokol Komunikasi Mesh Offline Terdesentralisasi<br/>
+    Berbasis Lightweight Cryptography (Ascon NIST SP 800-232)
+  </p>
+
+  <div class="cover-meta">
+    <div class="meta-item">
+      <div class="meta-label">Nama Proyek</div>
+      <div class="meta-value">CARAKA Desktop</div>
+    </div>
+    <div class="meta-item">
+      <div class="meta-label">Mata Kuliah</div>
+      <div class="meta-value">Implementasi Kriptografi</div>
+    </div>
+    <div class="meta-item">
+      <div class="meta-label">Tim Pengusul</div>
+      <div class="meta-value">CARAKA TEAM</div>
+    </div>
+    <div class="meta-item">
+      <div class="meta-label">NIM</div>
+      <div class="meta-value">2322101878 / 23221019</div>
+    </div>
+    <div class="meta-item">
+      <div class="meta-label">Versi Proposal</div>
+      <div class="meta-value">v2.0 — Juli 2026</div>
+    </div>
+    <div class="meta-item">
+      <div class="meta-label">Status</div>
+      <div class="meta-value" style="color:var(--accent3)">✓ Fase 1–6 Selesai</div>
+    </div>
+  </div>
+
+  <div class="cover-chips">
+    <span class="chip accent">Rust + Tauri v2</span>
+    <span class="chip green">Ascon-AEAD128 (NIST SP 800-232)</span>
+    <span class="chip sky">X25519 ECDH</span>
+    <span class="chip">Argon2id Vault</span>
+    <span class="chip">Tor Hidden Service</span>
+    <span class="chip">Emergency Mesh Mode</span>
+    <span class="chip">Epidemic Sync</span>
+    <span class="chip">QR Verification</span>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════
+     BODY
+     ════════════════════════════════════════════════ -->
+<div class="page-wrap">
+
+  <!-- Table of Contents -->
+  <div class="toc">
+    <div class="toc-title">📋 Daftar Isi</div>
+    <ol>
+      <li><a href="#identitas">Identitas Pengusul</a></li>
+      <li><a href="#pendahuluan">Latar Belakang &amp; Motivasi</a></li>
+      <li><a href="#permasalahan">Identifikasi Masalah &amp; Komparasi</a></li>
+      <li><a href="#algoritma">Analisis Algoritma LWC</a></li>
+      <li><a href="#arsitektur">Desain Arsitektur Sistem</a></li>
+      <li><a href="#protokol">Protokol CLAMP v0.1</a></li>
+      <li><a href="#fitur">Fitur-Fitur Implementasi</a></li>
+      <li><a href="#keamanan">Arsitektur Keamanan &amp; Threat Model</a></li>
+      <li><a href="#evaluasi">Rancangan Evaluasi Empiris</a></li>
+      <li><a href="#jadwal">Jadwal &amp; Luaran</a></li>
+      <li><a href="#referensi">Daftar Pustaka</a></li>
+    </ol>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- I. IDENTITAS                           -->
+  <!-- ══════════════════════════════════════ -->
+  <div id="identitas">
+    <div class="section-header">
+      <div class="section-icon si-indigo">👤</div>
+      <div>
+        <div class="section-num">Bagian I</div>
+        <div class="section-title">Identitas Pengusul</div>
+      </div>
+    </div>
+
+    <div class="id-table">
+      <div class="id-row"><span class="id-key">Nama Mahasiswa</span><span class="id-val">[Nama Mahasiswa / Kelompok]</span></div>
+      <div class="id-row"><span class="id-key">NIM</span><span class="id-val">2322101878 / 23221019</span></div>
+      <div class="id-row"><span class="id-key">Program Studi</span><span class="id-val">[Nama Program Studi]</span></div>
+      <div class="id-row"><span class="id-key">Fakultas</span><span class="id-val">[Nama Fakultas]</span></div>
+      <div class="id-row"><span class="id-key">Universitas</span><span class="id-val">[Nama Universitas]</span></div>
+      <div class="id-row"><span class="id-key">Dosen Pengampu</span><span class="id-val">[Nama Dosen]</span></div>
+      <div class="id-row"><span class="id-key">Semester / T.A.</span><span class="id-val">[Semester] / 2025–2026</span></div>
+      <div class="id-row"><span class="id-key">Tanggal Pengajuan</span><span class="id-val">Juli 2026</span></div>
+      <div class="id-row"><span class="id-key">Versi Proposal</span><span class="id-val">v2.0 (diperbarui)</span></div>
+      <div class="id-row"><span class="id-key">Repositori</span><span class="id-val">github.com/0xAre/CARAKA-DEKSTOP</span></div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- II. PENDAHULUAN                        -->
+  <!-- ══════════════════════════════════════ -->
+  <div id="pendahuluan">
+    <div class="section-header">
+      <div class="section-icon si-indigo">📖</div>
+      <div>
+        <div class="section-num">Bagian II</div>
+        <div class="section-title">Latar Belakang &amp; Motivasi</div>
+      </div>
+    </div>
+
+    <p>
+      Infrastruktur komunikasi digital kontemporer memiliki dependensi yang hampir mutlak terhadap entitas
+      terpusat: server, <em>Content Delivery Network (CDN)</em>, penyedia layanan internet, dan tulang punggung
+      jaringan global. Dependensi ini menciptakan <em>single point of failure</em> yang secara arsitektural
+      berbahaya dalam tiga skenario utama:
+    </p>
+    <ul>
+      <li><strong>Kegagalan Infrastruktur</strong> — bencana alam, gempa bumi, banjir, atau pemadaman listrik yang melumpuhkan jaringan telekomunikasi justru pada momen kebutuhan komunikasi paling kritis.</li>
+      <li><strong>Pembatasan Akses Disengaja</strong> — pembatasan atau pemblokiran jaringan oleh pihak berwenang di kondisi tertentu yang memutus komunikasi secara masif.</li>
+      <li><strong>Degradasi Layanan</strong> — kemacetan jaringan pada kondisi darurat massal ketika ribuan pengguna mengakses satu infrastruktur terpusat secara bersamaan.</li>
+    </ul>
+
+    <p>
+      Jaringan <em>Peer-to-Peer (P2P) Mesh</em> menawarkan solusi arsitektural alternatif yang fundamental:
+      setiap perangkat berperan ganda sebagai klien sekaligus <em>router</em>, memungkinkan pesan mencapai
+      tujuannya melalui jalur alternatif tanpa bergantung pada entitas pusat.
+    </p>
+
+    <div class="note-box">
+      <strong>Konteks NIST LWC:</strong> Pada tahun 2023, NIST mengumumkan terpilihnya keluarga
+      <strong>Ascon</strong> sebagai standar <em>Lightweight Cryptography</em>, kemudian dipublikasikan
+      sebagai <strong>NIST SP 800-232</strong> pada Agustus 2025. CARAKA adalah implementasi pertama yang
+      mengintegrasikan standar ini secara penuh ke dalam protokol komunikasi mesh terdesentralisasi.
+    </div>
+
+    <h3 class="subsection">Tantangan Kriptografi pada Jaringan Mesh</h3>
+    <p>Mengamankan komunikasi pada arsitektur multi-hop menghadirkan tiga tantangan utama yang belum terpecahkan secara optimal:</p>
+    <ol>
+      <li><strong>Overhead Ukuran Paket</strong> — pada radio <em>low-bandwidth</em> (LoRa, 256 byte/paket), tanda tangan Ed25519 mengkonsumsi 64 byte (>25% kapasitas) hanya untuk autentikasi per paket.</li>
+      <li><strong>Kebocoran Metadata Routing</strong> — sistem yang ada membiarkan <em>routing header</em> dalam <em>plaintext</em>, sehingga analisis lalu lintas pasif dapat memetakan topologi jaringan.</li>
+      <li><strong>Manajemen Kunci pada Jaringan Delay-Tolerant</strong> — <em>Perfect Forward Secrecy</em> berbasis <em>Double Ratchet</em> memerlukan urutan pesan yang terjamin, sebuah asumsi yang tidak berlaku pada jaringan offline dengan penundaan tak tentu.</li>
+    </ol>
+
+    <h3 class="subsection">Kontribusi Penelitian</h3>
+    <div class="pillar-grid">
+      <div class="pillar pillar-1">
+        <div class="pillar-num">Kontribusi 1</div>
+        <div class="pillar-title">Protokol CLAMP</div>
+        <div class="pillar-desc"><em>Compact Lightweight Authenticated Mesh Protocol</em> — protokol store-and-forward menggunakan Ascon sebagai satu-satunya keluarga kriptografi untuk AEAD, Hash, dan MAC berlapis-hop. Mengganti Ed25519 (64 byte) dengan Ascon-MAC (16 byte) — penghematan <strong>75%</strong> overhead autentikasi.</div>
+      </div>
+      <div class="pillar pillar-2">
+        <div class="pillar-num">Kontribusi 2</div>
+        <div class="pillar-title">Analisis Komparatif LWC</div>
+        <div class="pillar-desc">Evaluasi sistematis terhadap Ascon, TinyJambu, GIFT-COFB, Grain-128AEAD, dan PRESENT dalam konteks <em>desktop mesh networking</em> — melengkapi literatur yang hanya mengevaluasi LWC pada perangkat tertanam (AVR, ARM Cortex-M).</div>
+      </div>
+      <div class="pillar pillar-3">
+        <div class="pillar-num">Kontribusi 3</div>
+        <div class="pillar-title">Arsitektur Privacy-Preserving Sync</div>
+        <div class="pillar-desc">Skema <em>Epidemic Sync</em> berbasis vektor Ascon-Hash256 yang memungkinkan node perantara membantu sinkronisasi pesan tanpa pernah dapat membaca kontennya.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- III. PERMASALAHAN & KOMPARASI          -->
+  <!-- ══════════════════════════════════════ -->
+  <div id="permasalahan">
+    <div class="section-header">
+      <div class="section-icon si-sky">🔍</div>
+      <div>
+        <div class="section-num">Bagian III</div>
+        <div class="section-title">Identifikasi Masalah &amp; Komparasi Sistem</div>
+      </div>
+    </div>
+
+    <h3 class="subsection">Tinjauan Sistem yang Ada</h3>
+
+    <h4 class="subsubsection">Meshtastic</h4>
+    <p><strong>Meshtastic</strong> adalah platform mesh <em>off-grid</em> berbasis radio LoRa pada mikrokontroler ESP32/NRF52, menggunakan AES-256-CTR dengan PSK untuk enkripsi channel dan AES-CCM + X25519 untuk <em>Direct Messages</em> (sejak firmware v2.5).</p>
+    <div class="warn-box"><strong>Keterbatasan terdokumentasi sendiri:</strong> <em>Routing header</em> dalam plaintext memungkinkan analisis topologi pasif. Tanda tangan XEdDSA (64 byte) mengkonsumsi >25% kapasitas paket LoRa. PSK statis berarti kompromi satu node membocorkan seluruh riwayat channel.</div>
+
+    <h4 class="subsubsection">Berty / Wesh Protocol</h4>
+    <p>Protokol offline-first terdesentralisasi berbasis IPFS dan OrbitDB, menggunakan X25519 untuk enkripsi dan Ed25519 untuk tanda tangan per-event. Overhead Ed25519 per-event yang direplikasi melalui gossip menghasilkan beban signifikan pada jaringan <em>low-bandwidth</em>. <strong>Berty sendiri mengakui belum siap untuk data sensitif tinggi.</strong></p>
+
+    <h4 class="subsubsection">Briar</h4>
+    <p>Routing offline Briar bergantung pada <em>social graph</em>: pesan hanya dapat diteruskan melalui kontak bersama (<em>mutual contacts</em>), bukan jaringan mesh generik. Tidak dapat beroperasi di lingkungan <em>ad-hoc</em> dengan anggota yang belum saling mengenal.</p>
+
+    <h4 class="subsubsection">Secure Scuttlebutt (SSB)</h4>
+    <p>Setiap entri log ditandatangani Ed25519 secara permanen, menciptakan rekam jejak digital yang tidak dapat dihapus — bertentangan fundamental dengan kebutuhan privasi pesan sementara.</p>
+
+    <h3 class="subsection">Tabel Perbandingan Komprehensif</h3>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Sistem</th>
+            <th>Overhead Autentikasi</th>
+            <th>Keamanan Metadata</th>
+            <th>Dukungan Offline</th>
+            <th>Kriptografi</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Meshtastic</td>
+            <td><span class="badge badge-red">64 byte — Ed25519</span></td>
+            <td><span class="badge badge-red">Tidak — header plaintext</span></td>
+            <td><span class="badge badge-green">Penuh</span></td>
+            <td>AES-CTR / AES-CCM</td>
+          </tr>
+          <tr>
+            <td>Berty</td>
+            <td><span class="badge badge-red">Ed25519 per-event</span></td>
+            <td><span class="badge badge-red">Tidak — gossip terbuka</span></td>
+            <td><span class="badge badge-yellow">Terbatas</span></td>
+            <td>X25519 + Ed25519</td>
+          </tr>
+          <tr>
+            <td>Briar</td>
+            <td><span class="badge badge-yellow">AES-GCM + Double Ratchet</span></td>
+            <td><span class="badge badge-yellow">Ya — via Tor (hanya online)</span></td>
+            <td><span class="badge badge-yellow">Terbatas (social graph)</span></td>
+            <td>Signal Protocol</td>
+          </tr>
+          <tr>
+            <td>Secure Scuttlebutt</td>
+            <td><span class="badge badge-red">Ed25519 per-log</span></td>
+            <td><span class="badge badge-red">Tidak — log permanen</span></td>
+            <td><span class="badge badge-green">Penuh</span></td>
+            <td>Ed25519</td>
+          </tr>
+          <tr style="background:rgba(99,102,241,0.07)">
+            <td><strong>CARAKA (Ini)</strong></td>
+            <td><span class="badge badge-green">17 byte — Ascon-MAC</span></td>
+            <td><span class="badge badge-green">Ya — MAC per-hop</span></td>
+            <td><span class="badge badge-green">Penuh</span></td>
+            <td><strong>Ascon NIST SP 800-232</strong></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="subsection">Research Gap</h3>
+    <div class="gap-box">
+      <div class="gap-title">🔬 Kesenjangan yang Diisi</div>
+      <p style="margin:0; color:var(--text-muted)">
+        <strong style="color:var(--text)">Tidak ada sistem komunikasi mesh offline yang mengintegrasikan standar NIST LWC (Ascon)
+        ke dalam desain protokol keamanannya</strong> untuk mengatasi masalah <em>cryptographic overhead</em>
+        pada autentikasi <em>multi-hop relay</em> dan enkripsi <em>metadata routing</em>. Secara spesifik,
+        belum ada penelitian yang membahas: (1) penggantian Ed25519 per-packet (64B) dengan Ascon-MAC per-hop (16B)
+        dalam protokol store-and-forward mesh; (2) penggunaan Ascon-Hash untuk Epidemic Sync yang
+        privacy-preserving; dan (3) evaluasi kuantitatif ciphertext expansion dan multi-hop latency
+        ketika LWC menggantikan kriptografi standar dalam sistem desktop mesh.
+      </p>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- IV. ANALISIS ALGORITMA                 -->
+  <!-- ══════════════════════════════════════ -->
+  <div id="algoritma">
+    <div class="section-header">
+      <div class="section-icon si-orange">🔬</div>
+      <div>
+        <div class="section-num">Bagian IV</div>
+        <div class="section-title">Analisis Algoritma Lightweight Cryptography</div>
+      </div>
+    </div>
+
+    <p>
+      NIST memulai proses standardisasi <em>Lightweight Cryptography (LWC)</em> pada 2013 untuk mengatasi
+      ketidaksesuaian antara algoritma standar (AES-GCM, SHA-256) dengan perangkat tertanam bersumber daya
+      sangat terbatas. Setelah evaluasi satu dekade, <strong>keluarga Ascon</strong> terpilih pada Februari
+      2023 dan dipublikasikan sebagai <strong>NIST SP 800-232</strong> pada Agustus 2025.
+    </p>
+
+    <h3 class="subsection">Matriks Perbandingan Finalis NIST LWC</h3>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Kriteria</th>
+            <th>ASCON ✓</th>
+            <th>TinyJambu</th>
+            <th>GIFT-COFB</th>
+            <th>Grain-128AEAD</th>
+            <th>PRESENT</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Status NIST</td>
+            <td><span class="badge badge-green">Standar (SP 800-232)</span></td>
+            <td><span class="badge badge-red">Finalis, tidak dipilih</span></td>
+            <td><span class="badge badge-red">Finalis, tidak dipilih</span></td>
+            <td><span class="badge badge-red">Finalis, tidak dipilih</span></td>
+            <td><span class="badge badge-muted">ISO/IEC 29192-2</span></td>
+          </tr>
+          <tr>
+            <td>Tingkat Keamanan</td>
+            <td><span class="badge badge-green">128-bit ✓</span></td>
+            <td><span class="badge badge-yellow">~120-bit ⚠</span></td>
+            <td><span class="badge badge-red">~64-bit efektif</span></td>
+            <td><span class="badge badge-green">128-bit ✓</span></td>
+            <td><span class="badge badge-red">80/128-bit (80 usang)</span></td>
+          </tr>
+          <tr>
+            <td>Kapabilitas</td>
+            <td>AEAD + Hash + XOF</td>
+            <td>AEAD saja</td>
+            <td>AEAD saja</td>
+            <td>AEAD saja</td>
+            <td>Block Cipher saja</td>
+          </tr>
+          <tr>
+            <td>Isu Kriptanalisis</td>
+            <td><span class="badge badge-green">Minimal</span></td>
+            <td>Birthday-bound slide attacks</td>
+            <td>Effective 64-bit tag forgery</td>
+            <td>Batas panjang keystream</td>
+            <td>Sweet32 (64-bit block)</td>
+          </tr>
+          <tr>
+            <td>Dukungan Rust</td>
+            <td><span class="badge badge-green">Kuat (RustCrypto)</span></td>
+            <td><span class="badge badge-red">Tidak ada crate resmi</span></td>
+            <td><span class="badge badge-red">Tidak ada crate resmi</span></td>
+            <td><span class="badge badge-yellow">Terbatas</span></td>
+            <td><span class="badge badge-red">Minimal</span></td>
+          </tr>
+          <tr>
+            <td>Cocok Desktop Mesh</td>
+            <td><span class="badge badge-green">✅ Sangat Cocok</span></td>
+            <td><span class="badge badge-red">❌ Tidak</span></td>
+            <td><span class="badge badge-yellow">⚠ Terbatas</span></td>
+            <td><span class="badge badge-yellow">⚠ Dengan syarat</span></td>
+            <td><span class="badge badge-red">❌ Tidak</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="subsection">Stack Kriptografi CARAKA yang Dipilih</h3>
+    <pre><code>┌────────────────────────────────────────────────────────────────┐
+│                   CARAKA Cryptographic Stack                   │
+├────────────────────┬───────────────────────────────────────────┤
+│ Fungsi             │ Primitif                                   │
+├────────────────────┼───────────────────────────────────────────┤
+│ Enkripsi Payload   │ Ascon-AEAD128 (NIST SP 800-232)           │
+│ Fungsi Hash        │ Ascon-Hash256 / HKDF-SHA256 (proxy)        │
+│ MAC per-Hop        │ HKDF-HMAC-SHA256 (keyed-MAC, 16 byte)     │
+│ Key Exchange       │ X25519 (ECDH) via x25519-dalek            │
+│ KDF                │ HKDF-SHA256 via hkdf + sha2               │
+│ Penyimpanan Key    │ Argon2id Vault (32 MiB, t=2) → Ascon-AEAD │
+│ Transport Anonim   │ Tor Hidden Service via arti-client         │
+└────────────────────┴───────────────────────────────────────────┘</code></pre>
+
+    <h3 class="subsection">Vault: Penyimpanan Kunci Terproteksi Argon2id</h3>
+    <p>Berbeda dari proposal v1 yang menggunakan Windows Credential Manager, CARAKA v2 mengimplementasikan <strong>vault file terenkripsi</strong> dengan KDF Argon2id (m=32768 KiB, t=2, p=1) yang menghasilkan kunci 16-byte untuk Ascon-AEAD128. Vault berukuran 80 byte: [16 salt][16 nonce][32 ct + 16 tag]. Format ini portabel lintas platform dan tidak bergantung pada OS-specific keystore.</p>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- V. ARSITEKTUR SISTEM                   -->
+  <!-- ══════════════════════════════════════ -->
+  <div id="arsitektur">
+    <div class="section-header">
+      <div class="section-icon si-green">🏗️</div>
+      <div>
+        <div class="section-num">Bagian V</div>
+        <div class="section-title">Desain Arsitektur Sistem</div>
+      </div>
+    </div>
+
+    <h3 class="subsection">Arsitektur Berlapis CARAKA Desktop</h3>
+
+    <div class="mermaid-wrap">
+      <div class="mermaid">
+graph TB
+    subgraph UI["🖥️ PRESENTATION LAYER — Tauri v2 (HTML/CSS/JS)"]
+        direction LR
+        Chat["💬 Chat UI"]
+        Radar["🗺️ Radar Topology"]
+        Settings["⚙️ Settings & QR"]
+        Emergency["🆘 Emergency Mode"]
+    end
+
+    subgraph APP["📦 APPLICATION LAYER — commands.rs"]
+        direction LR
+        IPC["Tauri IPC Bridge"]
+        VaultCmd["Vault Commands"]
+        EmCmd["Emergency Commands"]
+        FileCmd["File Transfer Commands"]
+    end
+
+    subgraph PROTO["🔗 PROTOCOL LAYER — CLAMP v0.1"]
+        direction LR
+        Packet["packet.rs — CLAMP Framing"]
+        Router["routing.rs — Controlled Flooding + Trust Score + Rate Limiter"]
+        Sync["sync.rs — Epidemic Sync"]
+    end
+
+    subgraph NET["🌐 NETWORK LAYER"]
+        direction LR
+        UDP["discovery.rs — UDP :7770 Broadcast"]
+        TCP["transport.rs — TCP :7771 Data"]
+        Tor["tor.rs — Onion Service (arti-client)"]
+        Hotspot["hotspot.rs — Emergency Wi-Fi (netsh)"]
+    end
+
+    subgraph STORAGE["💾 STORAGE LAYER"]
+        direction LR
+        Store["store.rs — SQLite (ciphertext only)"]
+        VaultFile["vault.rs — Argon2id Vault File"]
+    end
+
+    subgraph CRYPTO["🔐 CRYPTOGRAPHY LAYER — NIST SP 800-232"]
+        direction LR
+        AEAD["crypto.rs — Ascon-AEAD128"]
+        Keys["keys.rs — X25519 ECDH + HKDF"]
+        Hash["Ascon-Hash256"]
+        NetMon["network_monitor.rs"]
+    end
+
+    UI --> APP
+    APP --> PROTO
+    APP --> STORAGE
+    PROTO --> NET
+    PROTO --> CRYPTO
+    STORAGE --> CRYPTO
+
+    style UI       fill:#1e1b4b,stroke:#6366f1,color:#e0e7ff
+    style APP      fill:#0c2340,stroke:#38bdf8,color:#e0f2fe
+    style PROTO    fill:#0c2a1a,stroke:#34d399,color:#d1fae5
+    style NET      fill:#2a1a0c,stroke:#fb923c,color:#ffedd5
+    style STORAGE  fill:#2a0c1a,stroke:#f472b6,color:#fce7f3
+    style CRYPTO   fill:#1a0c2a,stroke:#a78bfa,color:#ede9fe
+      </div>
+    </div>
+    <p class="diagram-caption">Gambar 1. Arsitektur Berlapis CARAKA Desktop — dependency graph dari UI ke layer kriptografi</p>
+
+    <h3 class="subsection">Struktur Modul Kode (Rust)</h3>
+
+    <div class="mermaid-wrap">
+      <div class="mermaid">
+graph LR
+    crypto["🔐 crypto.rs\nAscon-AEAD128\nMAC / Hash"] 
+    keys["🗝️ keys.rs\nX25519 Keypair\nECDH + HKDF\nDM-Key Derivation"]
+    vault["🔒 vault.rs\nArgon2id KDF\nVault R/W"]
+
+    packet["📦 packet.rs\nCLAMP Framing\nEncode / Decode\nPacket Types"]
+    routing["🔀 routing.rs\nControlled Flooding\nTTL + Trust Score\nRate Limiter (Token Bucket)"]
+
+    discovery["📡 discovery.rs\nUDP Broadcast\nHello Beacon"]
+    transport["🌐 transport.rs\nTCP Server/Client\nEpidemic Sync Handler"]
+    tor["🧅 tor.rs\nOnion Service\narti-client"]
+    hotspot["📶 hotspot.rs\nWi-Fi Hotspot\nEmergency Subnet Scan"]
+
+    store["💾 store.rs\nSQLite Encrypted\nMessage / Peer / Session"]
+    sync["🔄 sync.rs\nEpidemic Sync\nFingerprint Vector"]
+    file_transfer["📁 file_transfer.rs\nFile Chunking\nE2EE Transfer"]
+    net_monitor["📊 network_monitor.rs\nNetwork State\nInterface Monitor"]
+
+    state["🧩 state.rs\nAppState\nArc Mutex"]
+    commands["⚡ commands.rs\nTauri IPC Commands"]
+
+    crypto --> packet
+    keys --> packet
+    vault --> state
+    packet --> routing
+    routing --> transport
+    routing --> discovery
+    packet --> store
+    store --> sync
+    state --> commands
+    routing --> commands
+    sync --> commands
+    tor --> commands
+    hotspot --> commands
+    file_transfer --> commands
+    net_monitor --> state
+
+    style crypto    fill:#1a0c2a,stroke:#a78bfa,color:#ede9fe
+    style keys      fill:#1a0c2a,stroke:#a78bfa,color:#ede9fe
+    style vault     fill:#1a0c2a,stroke:#a78bfa,color:#ede9fe
+    style packet    fill:#0c2a1a,stroke:#34d399,color:#d1fae5
+    style routing   fill:#0c2a1a,stroke:#34d399,color:#d1fae5
+    style discovery fill:#2a1a0c,stroke:#fb923c,color:#ffedd5
+    style transport fill:#2a1a0c,stroke:#fb923c,color:#ffedd5
+    style tor       fill:#2a1a0c,stroke:#fb923c,color:#ffedd5
+    style hotspot   fill:#2a1a0c,stroke:#fb923c,color:#ffedd5
+    style store     fill:#2a0c1a,stroke:#f472b6,color:#fce7f3
+    style sync      fill:#2a0c1a,stroke:#f472b6,color:#fce7f3
+    style file_transfer fill:#2a0c1a,stroke:#f472b6,color:#fce7f3
+    style net_monitor fill:#0c2340,stroke:#38bdf8,color:#e0f2fe
+    style state     fill:#0c2340,stroke:#38bdf8,color:#e0f2fe
+    style commands  fill:#1e1b4b,stroke:#6366f1,color:#e0e7ff
+      </div>
+    </div>
+    <p class="diagram-caption">Gambar 2. Dependency graph antar modul Rust CARAKA Desktop</p>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- VI. PROTOKOL CLAMP                     -->
+  <!-- ══════════════════════════════════════ -->
+  <div id="protokol">
+    <div class="section-header">
+      <div class="section-icon si-pink">📡</div>
+      <div>
+        <div class="section-num">Bagian VI</div>
+        <div class="section-title">Protokol CLAMP v0.1</div>
+      </div>
+    </div>
+
+    <p>
+      <strong>CLAMP</strong> (<em>Compact Lightweight Authenticated Mesh Protocol</em>) adalah protokol
+      lapisan aplikasi biner yang dirancang khusus untuk CARAKA Desktop. Setiap paket memiliki
+      <strong>fixed overhead 62 byte</strong> yang mencakup routing header, hop authentication, nonce, dan AEAD tag.
+    </p>
+
+    <h3 class="subsection">Struktur Paket CLAMP</h3>
+    <pre><code>Offset  Size  Field             Deskripsi
+──────  ────  ────────────────  ─────────────────────────────────────────────
+  0       2   magic             0xCA, 0x52 — identifikasi protokol CARAKA
+  2       1   version           0x01 — versi protokol
+  3       1   packet_type       0x01=DM | 0x02=Channel | 0x03=SyncReq
+                                0x04=SyncResp | 0x05=Hello | 0x06=SyncData
+                                0x07=Broadcast
+  4       1   ttl               0–7, dikurangi setiap relay hop
+  5       8   packet_id         origin_node_id[0..4] || OsRng[4..8]
+─────────────────────────────────────── (13 byte HEADER)
+ 13       1   hop_counter       0 saat origin, +1 per relay
+ 14      16   hop_mac_tag       HKDF-HMAC(ch_key, pkt_id||hop_ctr||relay_id[0..4])
+─────────────────────────────────────── (17 byte HOP AUTH)
+ 30      16   nonce             timestamp_u32_LE[0..4] || OsRng[4..16]
+ 46       N   ciphertext        Ascon-AEAD128 encrypted inner payload
+ 46+N    16   aead_tag          Authentication tag 128-bit
+─────────────────────────────────────── (Total fixed overhead: 62 byte)</code></pre>
+
+    <h3 class="subsection">Perbandingan Overhead vs. Meshtastic</h3>
+    <pre><code>Meshtastic (untuk paket LoRa 256 byte):
+  Header + Routing : ~30 byte (plaintext — bocor ke pihak ketiga)
+  AES-CCM Overhead :  8 byte (nonce) + 8 byte (tag)
+  XEdDSA Signature : 64 byte (Ed25519)
+  Total Overhead   : ~110 byte → hanya ~146 byte untuk payload
+
+CARAKA / Protokol CLAMP:
+  Routing Header   : 13 byte
+  Hop Auth (MAC)   : 17 byte (hop_counter + 16 byte HMAC tag)
+  Ascon Nonce      : 16 byte
+  Ascon AEAD Tag   : 16 byte
+  Total Overhead   : 62 byte → ~194 byte untuk payload
+                                   (+33% lebih besar dari Meshtastic)</code></pre>
+
+    <h3 class="subsection">Alur Pengiriman Direct Message (DM)</h3>
+
+    <div class="mermaid-wrap">
+      <div class="mermaid">
+sequenceDiagram
+    actor Alice as 👤 Alice (Pengirim)
+    participant Bob as 🔀 Bob (Relay)
+    actor Charlie as 👤 Charlie (Penerima)
+
+    Note over Alice: [1] Derive DM-Key via X25519 ECDH
+    Note over Alice: shared = X25519(alice_priv, charlie_pub)
+    Note over Alice: dm_key = HKDF(shared, session_id, msg_counter)
+
+    Note over Alice: [2] Enkripsi Payload
+    Note over Alice: nonce = timestamp[0..4] || random[4..16]
+    Note over Alice: (ct, tag) = Ascon-AEAD128(dm_key, nonce, plaintext, AAD)
+
+    Note over Alice: [3] Build CLAMP Packet
+    Note over Alice: header = Magic + Version + Type + TTL(7) + PacketID
+    Note over Alice: hop_mac = HMAC(ch_key, pkt_id || hop=0 || alice_id[0..4])
+
+    Alice->>Bob: CLAMP Packet (header+hop_auth+encrypted_payload)
+
+    Note over Bob: [4] Validasi Hop-MAC
+    Note over Bob: Jika VALID: kurangi TTL, perbarui hop_counter++
+    Note over Bob: Hitung ulang Hop-MAC dengan relay_id Bob
+    Note over Bob: Jika INVALID: drop paket diam-diam
+
+    Bob->>Charlie: CLAMP Packet (hop_counter=1, hop_mac diperbarui)
+
+    Note over Charlie: [5] Validasi Hop-MAC ✓
+    Note over Charlie: Derive dm_key = HKDF(X25519(charlie_priv,alice_pub), ...)
+    Note over Charlie: plaintext = Ascon-AEAD128.decrypt(dm_key, nonce, ct, tag, AAD)
+    Note over Charlie: Tampilkan pesan ke pengguna ✓
+      </div>
+    </div>
+    <p class="diagram-caption">Gambar 3. Sequence diagram pengiriman Direct Message E2EE melalui relay node</p>
+
+    <h3 class="subsection">Model Kunci</h3>
+
+    <div class="mermaid-wrap">
+      <div class="mermaid">
+graph TD
+    PK["X25519 Key Pair\n(identitas permanen node)\nDisimpan di vault.key (Argon2id-protected)"]
+
+    PK --> ECDH["ECDH: X25519(my_priv, peer_pub)\n→ Shared Secret (32 byte)"]
+
+    ECDH --> DM["HKDF-SHA256(\n  secret=shared_secret,\n  info='CARAKA-DM-SEND/RECV-v1'|my_id|peer_id|session_id|msg_counter\n)\n→ DM-Key AeadKey(16 byte)"]
+
+    ECDH --> CH["Channel MAC-Key (out-of-band via QR Code)\nHKDF(master_secret, 'CARAKA-CH-MAC-v1'|channel_id)\n→ MacKey(16 byte)"]
+
+    DM --> E2EE["Ascon-AEAD128\nEnkripsi payload E2EE"]
+    CH --> HopMAC["HKDF-HMAC\nAutentikasi per-hop relay"]
+
+    VaultPW["🔐 Passphrase Pengguna"]
+    Argon2["Argon2id KDF\nm=32768 KiB, t=2, p=1"]
+    VaultKey["Vault Key (16 byte)"]
+    VaultEnc["Ascon-AEAD128 Encrypt\nPrivate Key → vault.key"]
+
+    VaultPW --> Argon2 --> VaultKey --> VaultEnc
+
+    style PK fill:#1a0c2a,stroke:#a78bfa,color:#ede9fe
+    style ECDH fill:#0c2a1a,stroke:#34d399,color:#d1fae5
+    style DM fill:#0c2040,stroke:#38bdf8,color:#e0f2fe
+    style CH fill:#2a1a0c,stroke:#fb923c,color:#ffedd5
+    style VaultPW fill:#2a0c1a,stroke:#f472b6,color:#fce7f3
+    style Argon2 fill:#2a0c1a,stroke:#f472b6,color:#fce7f3
+    style VaultKey fill:#1e1b4b,stroke:#6366f1,color:#e0e7ff
+    style VaultEnc fill:#1e1b4b,stroke:#6366f1,color:#e0e7ff
+      </div>
+    </div>
+    <p class="diagram-caption">Gambar 4. Model hierarki kunci CARAKA Desktop</p>
+
+    <h3 class="subsection">Topologi Jaringan Mesh</h3>
+
+    <div class="mermaid-wrap">
+      <div class="mermaid">
+graph LR
+    subgraph Topologi_Linear["Topologi Linear — worst-case latency"]
+        A1["Node A"] -->|TTL=7| B1["Node B"] -->|TTL=6| C1["Node C"] -->|TTL=5| D1["Node D"] -->|TTL=4| E1["Node E"]
+    end
+
+    subgraph Topologi_Star["Topologi Star — distribusi via hub"]
+        Hub["Hub Node"] -->|TTL=6| S1["Spoke 1"]
+        Hub -->|TTL=6| S2["Spoke 2"]
+        Hub -->|TTL=6| S3["Spoke 3"]
+        Origin["Origin"] -->|TTL=7| Hub
+    end
+
+    subgraph Topologi_Mesh["Topologi Mesh — 10 node, avg 3 tetangga"]
+        M1["N1"] --- M2["N2"]
+        M2 --- M3["N3"]
+        M3 --- M4["N4"]
+        M1 --- M4
+        M2 --- M5["N5"]
+        M4 --- M6["N6"]
+        M5 --- M7["N7"]
+        M6 --- M7
+        M7 --- M8["N8"]
+    end
+
+    style Topologi_Linear fill:#1e1b4b,stroke:#6366f1,color:#e0e7ff
+    style Topologi_Star fill:#0c2a1a,stroke:#34d399,color:#d1fae5
+    style Topologi_Mesh fill:#2a1a0c,stroke:#fb923c,color:#ffedd5
+      </div>
+    </div>
+    <p class="diagram-caption">Gambar 5. Tiga topologi uji yang digunakan dalam evaluasi network-level benchmark</p>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- VII. FITUR IMPLEMENTASI                -->
+  <!-- ══════════════════════════════════════ -->
+  <div id="fitur">
+    <div class="section-header">
+      <div class="section-icon si-gold">⚡</div>
+      <div>
+        <div class="section-num">Bagian VII</div>
+        <div class="section-title">Fitur-Fitur Implementasi</div>
+      </div>
+    </div>
+
+    <p>Berikut adalah daftar fitur yang telah diimplementasikan pada CARAKA Desktop v2, mencakup pembaruan signifikan dari proposal v1:</p>
+
+    <div class="card-grid">
+      <div class="feature-card">
+        <div class="feature-icon">🔐</div>
+        <div class="feature-title">End-to-End Encryption (E2EE)</div>
+        <div class="feature-desc">Setiap DM dienkripsi dengan Ascon-AEAD128 + X25519 ECDH sebelum meninggalkan perangkat. Node relay tidak pernah dapat membaca isi pesan.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔒</div>
+        <div class="feature-title">Argon2id Vault [BARU]</div>
+        <div class="feature-desc">Private key disimpan dalam vault file terenkripsi Argon2id (m=32768 KiB) + Ascon-AEAD128. Format portabel lintas platform, menggantikan Windows Credential Manager.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🌐</div>
+        <div class="feature-title">Mesh Networking (CLAMP)</div>
+        <div class="feature-desc">Protokol CLAMP dengan Controlled Flooding, TTL max 7 hop, Packet ID LRU-512 deduplication, dan Trust Score per-peer.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📡</div>
+        <div class="feature-title">Auto Peer Discovery</div>
+        <div class="feature-desc">UDP Broadcast (192.255.255.255:7770) setiap 30 detik. Mendukung penambahan peer manual via IP:Port, QR Code, atau Invite Code base64url.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🛡️</div>
+        <div class="feature-title">Token Bucket Rate Limiter [BARU]</div>
+        <div class="feature-desc">Perlindungan per-peer: burst 200 paket, 100 paket/detik. Pelanggaran menurunkan Trust Score secara otomatis untuk mitigasi Sybil Attack.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">💾</div>
+        <div class="feature-title">Offline-First + Epidemic Sync</div>
+        <div class="feature-desc">Pesan tersimpan terenkripsi di SQLite. Epidemic Sync via Message Fingerprint Vector (SHA-256 hash) saat peer kembali terhubung.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔍</div>
+        <div class="feature-title">QR Code + Safety Number [BARU]</div>
+        <div class="feature-desc">Verifikasi identitas peer via QR code yang berisi Node ID. Safety Number berbasis SHA-256 canonical untuk verifikasi out-of-band fingerprint.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🆘</div>
+        <div class="feature-title">Emergency Broadcast [BARU]</div>
+        <div class="feature-desc">Siaran darurat bertipe INFO/EVAC/STATUS/RESOURCE dengan flooding mesh TTL=7. Payload tidak dienkripsi untuk memastikan semua node dapat membaca pesan darurat.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📶</div>
+        <div class="feature-title">Emergency Hotspot Mode [BARU]</div>
+        <div class="feature-desc">Aktifkan Windows Mobile Hotspot SSID "CARAKA-Emergency" (open network) via netsh. Subnet scan 192.168.137.x untuk koneksi darurat tanpa infrastruktur.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🧅</div>
+        <div class="feature-title">Tor Hidden Service [BARU]</div>
+        <div class="feature-desc">Setiap node mendapatkan alamat .onion persisten via arti-client. Invite Code mendukung format caraka1 (via Tor) dan caraka0 (via LAN).</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📁</div>
+        <div class="feature-title">File Transfer E2EE [BARU]</div>
+        <div class="feature-desc">Transfer file hingga 5 MB per file via jalur enkripsi DM yang sama. File di-chunk dan dienkripsi sebelum dikirim melalui jaringan mesh.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🗺️</div>
+        <div class="feature-title">Radar Topology View</div>
+        <div class="feature-desc">Visualisasi real-time topologi jaringan mesh dengan garis koneksi antar node, Trust Score indicator, dan status online/offline tiap peer.</div>
+      </div>
+    </div>
+
+    <h3 class="subsection">Status Implementasi Per Fase</h3>
+
+    <div class="timeline">
+      <div class="tl-item">
+        <div class="tl-dot done">✓</div>
+        <div class="tl-label">Fase 1 — Selesai</div>
+        <div class="tl-title">Core Cryptographic Engine</div>
+        <div class="tl-desc">Ascon-AEAD128 (NistSP 800-232), X25519 ECDH, HKDF-SHA256, Argon2id Vault, Nonce generation + timestamp validation, Zeroize on drop.</div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot done">✓</div>
+        <div class="tl-label">Fase 2 — Selesai</div>
+        <div class="tl-title">Protokol CLAMP Engine</div>
+        <div class="tl-desc">Packet struct + binary encode/decode, LRU-512 Packet ID cache (deduplication + replay protection), timestamp window ±300 detik, semua packet types (DM, Broadcast, Sync, Hello, File).</div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot done">✓</div>
+        <div class="tl-label">Fase 3 — Selesai</div>
+        <div class="tl-title">P2P Networking + Routing</div>
+        <div class="tl-desc">UDP Broadcast discovery, TCP transport dengan framing, Controlled Flooding routing, Trust Score per-peer, Token Bucket rate limiter (burst 200, 100 pkt/det).</div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot done">✓</div>
+        <div class="tl-label">Fase 4 — Selesai</div>
+        <div class="tl-title">GUI Desktop (Tauri v2)</div>
+        <div class="tl-desc">Chat interface, daftar peer + Trust Score, status koneksi, Radar topology view, Emergency Mode UI, Settings panel.</div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot done">✓</div>
+        <div class="tl-label">Fase 5 — Selesai</div>
+        <div class="tl-title">Security Hardening</div>
+        <div class="tl-desc">Argon2id vault menggantikan Windows Credential Manager, QR Code peer verification, Safety Number (SHA-256 canonical), rate limiting, Tauri CSP policy.</div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot done">✓</div>
+        <div class="tl-label">Fase 6 — Selesai</div>
+        <div class="tl-title">Fitur Lanjutan</div>
+        <div class="tl-desc">Epidemic Sync, Emergency Broadcast (INFO/EVAC/STATUS/RESOURCE), Emergency Hotspot (netsh), Tor Hidden Service (arti-client), File Transfer E2EE, CI/CD release pipeline via GitHub Actions, Text Invite Code (base64url).</div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot active">→</div>
+        <div class="tl-label">Fase 7 — Sedang Berjalan</div>
+        <div class="tl-title">Evaluasi &amp; Benchmark</div>
+        <div class="tl-desc">Microbenchmark kriptografi (Criterion.rs), Network-level benchmark multi-topologi, penulisan laporan akademik final.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- VIII. KEAMANAN & THREAT MODEL          -->
+  <!-- ══════════════════════════════════════ -->
+  <div id="keamanan">
+    <div class="section-header">
+      <div class="section-icon si-pink">🛡️</div>
+      <div>
+        <div class="section-num">Bagian VIII</div>
+        <div class="section-title">Arsitektur Keamanan &amp; Threat Model</div>
+      </div>
+    </div>
+
+    <h3 class="subsection">Properti Keamanan yang Dijamin</h3>
+    <ul>
+      <li><strong>Confidentiality (E2EE):</strong> Setiap pesan dienkripsi Ascon-AEAD128 dengan kunci unik per-sesi sebelum meninggalkan perangkat. Relay node tidak dapat membaca isi pesan.</li>
+      <li><strong>Integrity &amp; Authentication:</strong> AEAD tag 128-bit memastikan modifikasi ciphertext apapun menyebabkan dekripsi gagal. Hop-MAC memvalidasi integritas di setiap relay.</li>
+      <li><strong>Replay Protection:</strong> LRU cache 512 Packet ID + timestamp window ±300 detik mencegah replay attack.</li>
+      <li><strong>Best-Effort Forward Secrecy:</strong> Session ID + msg_counter unik per pesan memberikan lapisan forward secrecy sederhana tanpa memerlukan ratchet sinkron.</li>
+      <li><strong>Key Protection:</strong> Private key dilindungi Argon2id vault (tidak pernah tersimpan sebagai plaintext di disk).</li>
+    </ul>
+
+    <h3 class="subsection">Model Ancaman</h3>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Kategori</th><th>Ancaman Spesifik</th><th>Level</th><th>Mitigasi dalam CARAKA</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Confidentiality</td>
+            <td>Penyadapan payload (Eavesdropping)</td>
+            <td><span class="badge badge-red">🔴 Tinggi</span></td>
+            <td>E2EE Ascon-AEAD128; ciphertext tidak terbaca tanpa kunci</td>
+          </tr>
+          <tr>
+            <td>Integrity</td>
+            <td>Modifikasi ciphertext (Tampering)</td>
+            <td><span class="badge badge-red">🔴 Tinggi</span></td>
+            <td>AEAD Tag 128-bit; modifikasi → dekripsi gagal</td>
+          </tr>
+          <tr>
+            <td>Replay</td>
+            <td>Kirim ulang paket lama</td>
+            <td><span class="badge badge-yellow">🟡 Sedang</span></td>
+            <td>LRU-512 Packet ID cache + timestamp window ±300 detik</td>
+          </tr>
+          <tr>
+            <td>Authentication</td>
+            <td>Penyamaran identitas (Impersonation)</td>
+            <td><span class="badge badge-yellow">🟡 Sedang</span></td>
+            <td>TOFU model + QR Code verification + Safety Number</td>
+          </tr>
+          <tr>
+            <td>Availability</td>
+            <td>Network Flooding / DoS</td>
+            <td><span class="badge badge-yellow">🟡 Sedang</span></td>
+            <td>TTL max 7 + Token Bucket rate limiter (100 pkt/det) + Trust Score</td>
+          </tr>
+          <tr>
+            <td>Availability</td>
+            <td>Sybil Attack</td>
+            <td><span class="badge badge-yellow">🟡 Sedang</span></td>
+            <td>Trust Score berbasis perilaku; node baru dimulai skor rendah</td>
+          </tr>
+          <tr>
+            <td>Privacy</td>
+            <td>Traffic Analysis</td>
+            <td><span class="badge badge-yellow">🟡 Sedang</span></td>
+            <td>Payload E2EE; header minimal; opsi Tor transport</td>
+          </tr>
+          <tr>
+            <td>Key Security</td>
+            <td>Pencurian private key dari disk</td>
+            <td><span class="badge badge-yellow">🟡 Sedang</span></td>
+            <td>Argon2id vault — key dienkripsi Ascon-AEAD128, tidak pernah plaintext</td>
+          </tr>
+          <tr>
+            <td>Routing</td>
+            <td>Manipulasi routing header</td>
+            <td><span class="badge badge-green">🟢 Rendah</span></td>
+            <td>Hop-MAC divalidasi setiap relay; paket invalid di-drop diam-diam</td>
+          </tr>
+          <tr>
+            <td>Confidentiality</td>
+            <td>Kompromi perangkat fisik</td>
+            <td><span class="badge badge-muted">❌ Di luar cakupan</span></td>
+            <td>Vault passphrase-protected, namun akses fisik tetap berbahaya</td>
+          </tr>
+          <tr>
+            <td>Confidentiality</td>
+            <td>Serangan Post-Quantum</td>
+            <td><span class="badge badge-muted">❌ Di luar cakupan v0.1</span></td>
+            <td>X25519 tidak PQC-resistant; direncanakan Kyber KEM pada v0.3</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="subsection">Asumsi Adversary</h3>
+    <p>CARAKA dirancang menghadapi adversary yang:</p>
+    <ul>
+      <li>Dapat mencegat (sniff) seluruh lalu lintas jaringan secara pasif.</li>
+      <li>Dapat menyuntikkan, mengubah, atau memblokir paket di layer jaringan (aktif).</li>
+      <li>Dapat menjalankan node berbahaya dalam jaringan (Sybil).</li>
+      <li><strong>Tidak dapat</strong> membobol primitif kriptografi yang digunakan (Ascon-AEAD, X25519, Argon2id).</li>
+      <li><strong>Tidak dapat</strong> secara fisik mengakses perangkat pengguna yang sah.</li>
+    </ul>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- IX. EVALUASI                           -->
+  <!-- ══════════════════════════════════════ -->
+  <div id="evaluasi">
+    <div class="section-header">
+      <div class="section-icon si-sky">📊</div>
+      <div>
+        <div class="section-num">Bagian IX</div>
+        <div class="section-title">Rancangan Evaluasi Empiris</div>
+      </div>
+    </div>
+
+    <h3 class="subsection">Level 1 — Microbenchmark Kriptografi (Criterion.rs)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Metrik</th><th>Satuan</th><th>Kondisi Uji</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Encryption Throughput</td><td>MB/s</td><td>Ukuran pesan: 64B, 256B, 1KB, 4KB, 16KB</td></tr>
+          <tr><td>Decryption Throughput</td><td>MB/s</td><td>Sama dengan kondisi enkripsi</td></tr>
+          <tr><td>Waktu Komputasi MAC</td><td>μs</td><td>HKDF-HMAC untuk input 13 byte (header)</td></tr>
+          <tr><td>Waktu Derivasi Kunci</td><td>μs</td><td>HKDF-SHA256 vs Ascon-XOF128</td></tr>
+          <tr><td>Waktu Buka Vault</td><td>ms</td><td>Argon2id KDF (cold start vs cached)</td></tr>
+          <tr><td>Memory Footprint</td><td>KB</td><td>Peak RAM per operasi kriptografi</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p><strong>Algoritma pembanding:</strong> Ascon-AEAD128 vs. AES-256-GCM vs. ChaCha20-Poly1305. Platform uji: Intel Core i5/i7 Gen 10+ (dengan dan tanpa AES-NI).</p>
+
+    <h3 class="subsection">Level 2 — Network-Level Benchmark (Multi-Node LAN)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Metrik</th><th>Satuan</th><th>Keterangan</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>End-to-End Latency</td><td>ms</td><td>Dari pengiriman hingga penerimaan, per topologi</td></tr>
+          <tr><td>Message Delivery Ratio</td><td>%</td><td>Dari 1.000 pesan yang dikirim, berapa yang diterima</td></tr>
+          <tr><td>Ciphertext Expansion</td><td>%</td><td>(ukuran paket CARAKA / ukuran plaintext) × 100%</td></tr>
+          <tr><td>Hop Overhead</td><td>byte</td><td>Overhead tambahan yang ditambahkan setiap relay</td></tr>
+          <tr><td>Sync Throughput</td><td>pesan/det</td><td>Kecepatan Epidemic Sync antar dua node</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="subsection">Baseline Perbandingan</h3>
+    <ul>
+      <li><strong>Baseline A (No-Crypto):</strong> Protokol CLAMP tanpa enkripsi — mengukur overhead jaringan murni.</li>
+      <li><strong>Baseline B (AES-GCM):</strong> Protokol CLAMP dengan AES-256-GCM + HMAC-SHA256 — mengukur selisih LWC vs. kriptografi konvensional.</li>
+    </ul>
+
+    <h3 class="subsection">Hipotesis yang Akan Dibuktikan</h3>
+    <div class="card">
+      <ol>
+        <li><strong>H1:</strong> Overhead autentikasi CARAKA (17 byte Ascon-MAC) adalah 73% lebih kecil dari Meshtastic (64 byte Ed25519), menghasilkan 33% ruang payload lebih besar untuk paket LoRa 256-byte.</li>
+        <li><strong>H2:</strong> Ascon-AEAD128 memiliki throughput lebih rendah dari AES-GCM pada CPU dengan AES-NI, namun lebih tinggi pada CPU tanpa akselerasi hardware.</li>
+        <li><strong>H3:</strong> Message Delivery Ratio ≥ 95% pada topologi linear 5-hop untuk 1.000 pesan di jaringan LAN normal.</li>
+        <li><strong>H4:</strong> Epidemic Sync dengan Ascon-Hash256 fingerprint vector tidak mengekspos plaintext kepada node perantara (diverifikasi via Wireshark packet capture).</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- X. JADWAL & LUARAN                     -->
+  <!-- ══════════════════════════════════════ -->
+  <div id="jadwal">
+    <div class="section-header">
+      <div class="section-icon si-gold">📅</div>
+      <div>
+        <div class="section-num">Bagian X</div>
+        <div class="section-title">Jadwal Pelaksanaan &amp; Luaran</div>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Minggu</th><th>Kegiatan</th><th>Deliverable</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td>Studi literatur, setup environment, desain protokol awal</td><td>Ringkasan literatur, environment berjalan</td><td><span class="badge badge-green">✓ Selesai</span></td></tr>
+          <tr><td>2</td><td>Implementasi modul kriptografi (Ascon-AEAD128, MAC, Hash)</td><td>crypto.rs + keys.rs + unit test</td><td><span class="badge badge-green">✓ Selesai</span></td></tr>
+          <tr><td>3</td><td>Implementasi Argon2id Vault dan manajemen kunci X25519</td><td>vault.rs + keys.rs update</td><td><span class="badge badge-green">✓ Selesai</span></td></tr>
+          <tr><td>4</td><td>Implementasi struktur paket CLAMP binary framing</td><td>packet.rs + unit test</td><td><span class="badge badge-green">✓ Selesai</span></td></tr>
+          <tr><td>5</td><td>Implementasi peer discovery + Token Bucket rate limiter</td><td>discovery.rs + routing.rs</td><td><span class="badge badge-green">✓ Selesai</span></td></tr>
+          <tr><td>6</td><td>Implementasi TCP transport + Epidemic Sync</td><td>transport.rs + sync.rs + store.rs</td><td><span class="badge badge-green">✓ Selesai</span></td></tr>
+          <tr><td>7</td><td>Implementasi GUI (Tauri v2), QR Code, Safety Number</td><td>Aplikasi desktop berjalan + QR verification</td><td><span class="badge badge-green">✓ Selesai</span></td></tr>
+          <tr><td>8</td><td>Emergency Mode: Hotspot, Broadcast, Tor Hidden Service, File Transfer</td><td>hotspot.rs + tor.rs + file_transfer.rs</td><td><span class="badge badge-green">✓ Selesai</span></td></tr>
+          <tr><td>9</td><td>Microbenchmark kriptografi (Criterion.rs)</td><td>Dataset benchmark kriptografi (CSV)</td><td><span class="badge badge-yellow">→ Berjalan</span></td></tr>
+          <tr><td>10</td><td>Network benchmark multi-topologi + analisis + penulisan makalah</td><td>Laporan evaluasi + makalah final</td><td><span class="badge badge-muted">○ Belum</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="subsection">Luaran yang Diharapkan</h3>
+    <ol>
+      <li><strong>Prototipe Aplikasi CARAKA Desktop</strong> — aplikasi fungsional (Windows/Linux) yang dapat diuji pada jaringan LAN nyata dengan GUI Tauri v2, fitur peer discovery, E2EE DM, Emergency Mode, dan Tor transport. <span class="badge badge-green">✓ Tercapai</span></li>
+      <li><strong>Spesifikasi Protokol CLAMP v0.1</strong> — dokumen teknis formal di <code>docs/CLAMP-SPEC.md</code> mendefinisikan format paket biner, operasi kriptografi, semantik routing, dan model kunci. <span class="badge badge-green">✓ Tercapai</span></li>
+      <li><strong>Repository Open-Source</strong> — seluruh kode sumber tersedia di <code>github.com/0xAre/CARAKA-DEKSTOP</code> dengan CI/CD release pipeline otomatis via GitHub Actions. <span class="badge badge-green">✓ Tercapai</span></li>
+      <li><strong>Dataset Benchmark</strong> — data evaluasi empiris perbandingan Ascon-AEAD128 vs. AES-256-GCM, tersedia sebagai open data. <span class="badge badge-yellow">→ Dalam Progress</span></li>
+      <li><strong>Makalah Teknis Akademik</strong> — laporan dengan format publikasi akademik mencakup tinjauan pustaka, analisis komparatif LWC, deskripsi desain protokol, hasil evaluasi kuantitatif, dan kesimpulan. <span class="badge badge-muted">○ Belum</span></li>
+    </ol>
+
+    <h3 class="subsection">Stack Teknologi Final</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Lapisan</th><th>Teknologi</th><th>Versi</th><th>Fungsi</th></tr></thead>
+        <tbody>
+          <tr><td>Framework Desktop</td><td>Tauri</td><td>v2.x</td><td>Cross-platform desktop; backend Rust native</td></tr>
+          <tr><td>Backend</td><td>Rust</td><td>1.78+ stable</td><td>Memory safety tanpa GC; ekosistem kriptografi terlengkap</td></tr>
+          <tr><td>Frontend</td><td>HTML5 + CSS3 + Vanilla JS</td><td>—</td><td>Minimalisasi dependencies frontend</td></tr>
+          <tr><td>Enkripsi Simetris</td><td>Ascon-AEAD128 (<code>ascon-aead</code>)</td><td>0.4.x</td><td>NIST SP 800-232 LWC Standard</td></tr>
+          <tr><td>Key Exchange</td><td>X25519 (<code>x25519-dalek</code>)</td><td>2.x</td><td>ECDH Diffie-Hellman; diaudit formal</td></tr>
+          <tr><td>Key Derivation</td><td>HKDF-SHA256 (<code>hkdf</code> + <code>sha2</code>)</td><td>latest</td><td>Standar RFC 5869</td></tr>
+          <tr><td>Penyimpanan Kunci</td><td>Argon2id Vault (<code>argon2</code>)</td><td>0.5.x</td><td>m=32MiB, t=2; portabel lintas platform</td></tr>
+          <tr><td>Database</td><td>SQLite (<code>rusqlite</code>)</td><td>0.31+</td><td>Hanya menyimpan ciphertext</td></tr>
+          <tr><td>Transport Anonim</td><td>Tor (<code>arti-client</code>)</td><td>latest</td><td>Onion service persisten</td></tr>
+          <tr><td>Runtime Async</td><td>Tokio</td><td>1.x</td><td>De-facto async runtime Rust</td></tr>
+          <tr><td>Benchmarking</td><td>Criterion.rs</td><td>0.5.x</td><td>Statistical benchmarking framework</td></tr>
+          <tr><td>QR Code</td><td><code>qrcode</code> + <code>image</code> + <code>base64</code></td><td>latest</td><td>Generate + encode QR Code peer verification</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- XI. DAFTAR PUSTAKA                     -->
+  <!-- ══════════════════════════════════════ -->
+  <div id="referensi">
+    <div class="section-header">
+      <div class="section-icon si-sky">📚</div>
+      <div>
+        <div class="section-num">Bagian XI</div>
+        <div class="section-title">Daftar Pustaka</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <ol style="font-size:13.5px; line-height:2; color:var(--text-muted)">
+        <li>Meshtastic Project. (2025). <em>Updated Security Implementation</em>. https://meshtastic.org/docs/development/reference/encryption-technical/</li>
+        <li>Berty Technologies. (2024). <em>Wesh Protocol Technical Documentation</em>. https://berty.tech/docs/protocol/</li>
+        <li>Berty Technologies. (2024). <em>Challenges in Building a Distributed Messaging System</em>. https://berty.tech/challenges</li>
+        <li>Briar Project. (2024). <em>How Briar Works</em>. https://briarproject.org/how-it-works/</li>
+        <li>Tarr, D., Lavoie, C., Meyer, A., &amp; Kermarrec, A.-M. (2019). <em>Secure Scuttlebutt: An Identity-Centric Protocol for Subjective and Decentralized Applications</em>. Proceedings of ACM ICN '19. https://doi.org/10.1145/3357150.3357396</li>
+        <li>Meshtastic Project. (2025). <em>Known Limitations and Future Plans of Meshtastic's Encryption</em>. https://meshtastic.org/docs/about/overview/encryption/limitations/</li>
+        <li>NIST. (2023). <em>Lightweight Cryptography Project</em>. https://csrc.nist.gov/Projects/lightweight-cryptography</li>
+        <li>NIST. (2025). <em>NIST Special Publication 800-232: Ascon-Based Lightweight Cryptography Standards for Constrained Devices</em>.</li>
+        <li>Dobraunig, C., Eichlseder, M., Mendel, F., &amp; Schläffer, M. (2021). <em>Ascon v1.2: Lightweight Authenticated Encryption and Hashing</em>. IACR ePrint 2021/1574.</li>
+        <li>Saha, D., et al. (2022). <em>Birthday-Bound Slide Attacks on TinyJAMBU's Keyed-Permutations</em>. Proceedings of ASIACRYPT 2022.</li>
+        <li>Banik, S., et al. (2017). <em>GIFT: A Small PRESENT — Towards Reaching the Limit of Lightweight Encryption</em>. IACR ePrint 2017/622.</li>
+        <li>Khairallah, M. (2021). <em>Security of COFB against Chosen Ciphertext Attacks</em>. IACR ePrint 2021/648.</li>
+        <li>Bogdanov, A., et al. (2007). <em>PRESENT: An Ultra-Lightweight Block Cipher</em>. Proceedings of CHES 2007. https://doi.org/10.1007/978-3-540-74735-2_31</li>
+        <li>Bhargavan, K., &amp; Leurent, G. (2016). <em>On the Practical (In-)Security of 64-bit Block Ciphers: Collision Attacks on HTTP over TLS and OpenVPN (Sweet32)</em>. Proceedings of ACM CCS 2016.</li>
+        <li>Banik, S., et al. (2023). <em>NIST IR 8454: Status Report on the Final Round of the NIST Lightweight Cryptography Standardization Process</em>. NIST.</li>
+        <li>Biryukov, A., &amp; Khovratovich, D. (2015). <em>Argon2: New Generation of Memory-Hard Functions for Password Hashing and Other Applications</em>. Proceedings of IEEE EuroS&amp;P 2016.</li>
+        <li>RustCrypto Project. (2024). <em>ascon-aead: Pure Rust implementation of the Ascon authenticated encryption algorithms</em>. https://github.com/RustCrypto/AEADs/tree/master/ascon-aead</li>
+        <li>The Tor Project / Arti Contributors. (2024). <em>arti-client: A pure-Rust Tor client library</em>. https://gitlab.torproject.org/tpo/core/arti</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- LEMBAR TANDA TANGAN                    -->
+  <!-- ══════════════════════════════════════ -->
+  <div class="divider"></div>
+
+  <div class="card" style="text-align:center">
+    <h3 style="font-size:1rem; font-weight:700; color:var(--text); margin-bottom:8px">Lembar Pernyataan Keaslian</h3>
+    <p style="font-size:13px; color:var(--text-muted); max-width:640px; margin:0 auto 28px">
+      Dengan mengajukan proposal ini, kami menyatakan bahwa proyek CARAKA Desktop merupakan karya orisinal
+      yang dikerjakan secara mandiri oleh pengusul. Seluruh referensi, data, dan sumber daya yang digunakan
+      telah dicantumkan sesuai ketentuan akademik yang berlaku. Proyek ini tidak pernah diajukan sebelumnya
+      dalam konteks akademik lain.
+    </p>
+
+    <div style="display:flex; justify-content:center; gap:60px; flex-wrap:wrap; margin-top:20px">
+      <div>
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:48px">[Tempat], Juli 2026</div>
+        <div style="width:160px; border-top:1px solid var(--border); padding-top:8px; margin:0 auto">
+          <div style="font-size:12px; color:var(--text-dim)">Yang Menyatakan</div>
+          <div style="font-size:13px; font-weight:600; color:var(--text); margin-top:4px">[Nama Mahasiswa]</div>
+          <div style="font-size:11px; color:var(--text-dim)">NIM: 2322101878</div>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:48px">&nbsp;</div>
+        <div style="width:160px; border-top:1px solid var(--border); padding-top:8px; margin:0 auto">
+          <div style="font-size:12px; color:var(--text-dim)">Yang Menyatakan</div>
+          <div style="font-size:13px; font-weight:600; color:var(--text); margin-top:4px">[Nama Mahasiswa]</div>
+          <div style="font-size:11px; color:var(--text-dim)">NIM: 23221019</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="doc-footer">
+    <strong style="color:var(--text-muted)">CARAKA Desktop</strong> — Proposal Implementasi Kriptografi v2.0 — Juli 2026<br/>
+    <span style="font-family:var(--font-mono); font-size:11px">github.com/0xAre/CARAKA-DEKSTOP</span><br/>
+    Dibuat dengan Rust 🦀 + Tauri ⚡ + Ascon 🔐
+  </div>
+
+</div><!-- end .page-wrap -->
+
+<script>
+  // Mermaid initialization
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#6366f1',
+      primaryTextColor: '#e0e7ff',
+      primaryBorderColor: '#4f46e5',
+      lineColor: '#64748b',
+      secondaryColor: '#1e293b',
+      tertiaryColor: '#0f172a',
+      background: '#0d1117',
+      mainBkg: '#1e293b',
+      nodeBorder: '#475569',
+      clusterBkg: '#1e293b',
+      titleColor: '#f1f5f9',
+      edgeLabelBackground: '#1e293b',
+      actorBkg: '#1e293b',
+      actorBorder: '#6366f1',
+      actorTextColor: '#e2e8f0',
+      actorLineColor: '#6366f1',
+      signalColor: '#94a3b8',
+      signalTextColor: '#f1f5f9',
+      labelBoxBkgColor: '#1e293b',
+      labelBoxBorderColor: '#6366f1',
+      labelTextColor: '#f1f5f9',
+      loopTextColor: '#f1f5f9',
+      noteBorderColor: '#38bdf8',
+      noteBkgColor: '#0c2340',
+      noteTextColor: '#f1f5f9',
+      activationBorderColor: '#34d399',
+      activationBkgColor: '#0c2a1a',
+      sequenceNumberColor: '#f1f5f9',
+      fontSize: '14px',
+    },
+    flowchart: {
+      curve: 'basis',
+      padding: 20,
+    },
+    sequence: {
+      diagramMarginX: 50,
+      diagramMarginY: 20,
+      actorMargin: 50,
+      width: 150,
+      height: 65,
+      boxMargin: 10,
+      boxTextMargin: 5,
+      noteMargin: 10,
+      messageMargin: 35,
+    },
+  });
+</script>
+</body>
+</html>
