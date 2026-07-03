@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/tauri.schema.json",
   "productName": "CARAKA Desktop",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "com.caraka.desktop",
   "build": {
     "beforeDevCommand": "npx --yes serve src -l 1420",
