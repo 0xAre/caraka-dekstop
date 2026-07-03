@@ -20,18 +20,21 @@
 //   - Beacon berisi: node_id_hex, display_name, tcp_port
 
 use std::net::{SocketAddr, Ipv4Addr};
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tauri::{Manager, Emitter};
+use tauri::Emitter;
 use tokio::net::UdpSocket;  // [FIX #1 & #2] tokio async UdpSocket
-use tokio::sync::Mutex;
 use tracing::{info, warn, debug};
-
-use crate::state::AppState;  // Import di atas agar tersedia di seluruh modul
 
 pub const DISCOVERY_PORT: u16 = 7770;
 pub const BEACON_INTERVAL_SEC: u64 = 5; // [FIX interval] was 30
+
+pub fn effective_discovery_port() -> u16 {
+    std::env::var("CARAKA_UDP_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DISCOVERY_PORT)
+}
 
 // ─── Beacon Format ─────────────────────────────────────────────────────────
 
@@ -134,7 +137,8 @@ fn get_local_broadcast_addrs() -> Vec<SocketAddr> {
                     return None;
                 }
 
-                let addr = SocketAddr::from((broadcast_ip, DISCOVERY_PORT));
+                let disc_port = effective_discovery_port();
+                let addr = SocketAddr::from((broadcast_ip, disc_port));
                 debug!("Interface {}: IP={}, Mask={}, Broadcast={}",
                     iface.name, v4.ip, v4.netmask, broadcast_ip);
                 Some(addr)
@@ -146,10 +150,10 @@ fn get_local_broadcast_addrs() -> Vec<SocketAddr> {
 
     if addrs.is_empty() {
         warn!("Tidak ada interface subnet aktif — fallback ke 255.255.255.255");
-        addrs.push(SocketAddr::from(([255, 255, 255, 255], DISCOVERY_PORT)));
+        addrs.push(SocketAddr::from(([255, 255, 255, 255], effective_discovery_port())));
     } else {
         // Tambahkan 255.255.255.255 sebagai fallback tambahan
-        addrs.push(SocketAddr::from(([255, 255, 255, 255], DISCOVERY_PORT)));
+        addrs.push(SocketAddr::from(([255, 255, 255, 255], effective_discovery_port())));
         info!("Interface aktif untuk broadcast: {:?}", addrs);
     }
 
@@ -165,7 +169,7 @@ fn get_local_broadcast_addrs() -> Vec<SocketAddr> {
 ///
 /// Berjalan sebagai background tokio task.
 pub async fn start_broadcaster(app_handle: tauri::AppHandle) {
-    info!("Discovery broadcaster dimulai (port {})", DISCOVERY_PORT);
+    info!("Discovery broadcaster dimulai (port {})", effective_discovery_port());
 
     // [FIX #2] tokio UdpSocket — async, non-blocking
     let socket = match UdpSocket::bind("0.0.0.0:0").await {
@@ -208,18 +212,19 @@ pub async fn start_broadcaster(app_handle: tauri::AppHandle) {
     }
 }
 
-/// Build beacon bytes dari AppState. [FIX #3] Sekarang async, pakai .lock().await.
+/// Build beacon bytes dari AppState.
+/// [FIX state-type] Dulu try_state::<Arc<Mutex<AppState>>> yang selalu None
+/// sejak F1 (managed type = Option<AppState>) — beacon tidak pernah terkirim
+/// dan discovery mati total. Sekarang lewat state::with_state.
 async fn build_beacon(app_handle: &tauri::AppHandle) -> Option<Vec<u8>> {
-    use crate::state::AppState;
+    let (node_id_hex, display_name) = crate::state::with_state(app_handle, |st| {
+        (st.node_id_hex.clone(), st.display_name.clone())
+    })
+    .await?;
 
-    let state_arc = app_handle.try_state::<Arc<Mutex<AppState>>>()?;
-
-    // [FIX #3] Gunakan .lock().await — dijamin dapat lock, tidak di-skip
-    let state = state_arc.lock().await;
-
-    let beacon = hex::decode(&state.node_id_hex).ok().and_then(|bytes| {
+    let beacon = hex::decode(&node_id_hex).ok().and_then(|bytes| {
         bytes.try_into().ok().map(|arr: [u8; 32]| {
-            PeerBeacon::new(&arr, &state.display_name, crate::transport::DATA_PORT)
+            PeerBeacon::new(&arr, &display_name, crate::transport::effective_data_port())
         })
     })?;
 
@@ -239,14 +244,15 @@ async fn build_beacon(app_handle: &tauri::AppHandle) -> Option<Vec<u8>> {
 ///   4. Emit event "peer_discovered" ke frontend
 ///   5. Emit event ke transport untuk initiate TCP connection
 pub async fn start_listener(app_handle: tauri::AppHandle) {
-    let bind_addr = format!("0.0.0.0:{}", DISCOVERY_PORT);
+    let disc_port = effective_discovery_port();
+    let bind_addr = format!("0.0.0.0:{}", disc_port);
     info!("Discovery listener dimulai di {}", bind_addr);
 
     // [FIX #1] tokio::net::UdpSocket — async, non-blocking
     let socket = match UdpSocket::bind(&bind_addr).await {
         Ok(s) => s,
         Err(e) => {
-            warn!("Gagal bind UDP port {}: {} — Discovery tidak aktif", DISCOVERY_PORT, e);
+            warn!("Gagal bind UDP port {}: {} — Discovery tidak aktif", disc_port, e);
             return;
         }
     };
@@ -266,14 +272,11 @@ pub async fn start_listener(app_handle: tauri::AppHandle) {
                     }
 
                     // Skip beacon dari diri sendiri
-                    let is_self = {
-                        if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
-                            let state = state_arc.lock().await;
-                            state.node_id_hex == beacon.node_id
-                        } else {
-                            false
-                        }
-                    };
+                    let is_self = crate::state::with_state(&app_handle, |st| {
+                        st.node_id_hex == beacon.node_id
+                    })
+                    .await
+                    .unwrap_or(false);
 
                     if is_self {
                         debug!("Skip beacon dari diri sendiri ({})", src_addr);
@@ -333,7 +336,7 @@ async fn save_peer_from_beacon(
     src_addr: &SocketAddr,
     app_handle: &tauri::AppHandle,
 ) {
-    use crate::state::AppState;
+
     use crate::store::PeerRecord;
 
     let now = std::time::SystemTime::now()
@@ -347,14 +350,11 @@ async fn save_peer_from_beacon(
         last_seen: now,
         ip_address: src_addr.ip().to_string(),
         tcp_port: beacon.tcp_port,
+        onion_address: String::new(), // tidak diketahui dari beacon LAN
         trust_score: 1.0, // Trust rendah sampai handshake konfirmasi
     };
 
-    if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
-        let state = state_arc.lock().await;
-        // Ambil Arc<Mutex<Connection>> dulu, lalu drop state agar tidak borrow overlap
-        let db_arc = state.db_conn.clone();
-        drop(state);
+    if let Some(db_arc) = crate::state::with_state(app_handle, |st| st.db_conn.clone()).await {
         let db = db_arc.lock().await;
         match crate::store::upsert_peer(&db, &peer) {
             Ok(_) => debug!("Peer {} disimpan dari beacon discovery", &beacon.node_id[..8]),

@@ -35,8 +35,29 @@ pub struct AppState {
     pub peer_senders: PeerSenders,
     pub network_state: Arc<Mutex<NetworkState>>,
     pub hop_mac_key: [u8; 16],
-    /// Tor context — None sampai bootstrap selesai (~30-60 detik pertama kali)
-    pub tor_ctx: Arc<Mutex<Option<Arc<crate::tor::TorContext>>>>,
+    /// Status transport Tor: Bootstrapping → Ready(ctx) | Failed(alasan).
+    pub tor_ctx: Arc<Mutex<crate::tor::TorState>>,
+}
+
+/// Akses AppState dari background task (transport/discovery/sync).
+///
+/// PENTING: managed state bertipe `Arc<Mutex<Option<AppState>>>` sejak F1.
+/// `try_state::<Arc<Mutex<AppState>>>()` dengan tipe lama tetap compile
+/// tapi SELALU None saat runtime — itu bug yang mematikan seluruh networking.
+/// Semua akses state dari background task wajib lewat helper ini.
+///
+/// Closure menerima `&AppState` — ambil clone Arc field yang dibutuhkan,
+/// jangan tahan lock lama. Return None jika vault belum di-unlock.
+pub async fn with_state<T>(
+    app_handle: &tauri::AppHandle,
+    f: impl FnOnce(&AppState) -> T,
+) -> Option<T> {
+    let state_arc = app_handle
+        .try_state::<Arc<Mutex<Option<AppState>>>>()?
+        .inner()
+        .clone();
+    let guard = state_arc.lock().await;
+    guard.as_ref().map(f)
 }
 
 /// Phase 1: Cek vault, emit status ke frontend.
@@ -114,8 +135,9 @@ pub async fn complete_initialize(
     let peer_senders: PeerSenders = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let network_state: Arc<Mutex<NetworkState>> = Arc::new(Mutex::new(NetworkState::Normal));
 
-    // 7b. Tor context placeholder — diisi async setelah AppState tersimpan
-    let tor_ctx: Arc<Mutex<Option<Arc<crate::tor::TorContext>>>> = Arc::new(Mutex::new(None));
+    // 7b. Tor state placeholder — diisi async setelah AppState tersimpan
+    let tor_ctx: Arc<Mutex<crate::tor::TorState>> =
+        Arc::new(Mutex::new(crate::tor::TorState::Bootstrapping));
 
     // 8. Build AppState
     let app_state = AppState {
@@ -130,6 +152,9 @@ pub async fn complete_initialize(
         hop_mac_key,
         tor_ctx: tor_ctx.clone(),
     };
+
+    // Clone Arc db untuk task bootstrap Tor (sebelum app_state di-move)
+    let db_conn_for_tor = app_state.db_conn.clone();
 
     // 9. Set managed Option<AppState> dari None → Some
     let managed = app_handle.state::<Arc<Mutex<Option<AppState>>>>();
@@ -194,8 +219,8 @@ pub async fn complete_initialize(
         serde_json::json!({
             "nodeId": node_id_hex,
             "fingerprint": fingerprint,
-            "tcpPort": crate::transport::DATA_PORT,
-            "discoveryPort": crate::discovery::DISCOVERY_PORT,
+            "tcpPort": crate::transport::effective_data_port(),
+            "discoveryPort": crate::discovery::effective_discovery_port(),
         }),
     )?;
 
@@ -208,6 +233,8 @@ pub async fn complete_initialize(
     // 13. Bootstrap Tor di background — tidak memblokir startup
     let tor_data_dir = app_handle.path().app_data_dir()?;
     let tor_handle = app_handle.clone();
+    let tor_senders = peer_senders.clone();
+    let tor_db = db_conn_for_tor;
     tokio::spawn(async move {
         let cache_dir = tor_data_dir.join("tor").join("cache");
         let state_dir = tor_data_dir.join("tor").join("state");
@@ -225,7 +252,7 @@ pub async fn complete_initialize(
         match launch_result {
             Ok(Ok(ctx)) => {
                 let onion = ctx.onion_address.clone();
-                *tor_ctx.lock().await = Some(ctx);
+                *tor_ctx.lock().await = crate::tor::TorState::Ready(ctx.clone());
                 tracing::info!("Tor siap → {}", onion);
                 tor_handle
                     .emit(
@@ -233,9 +260,66 @@ pub async fn complete_initialize(
                         serde_json::json!({ "status": "ready", "onionAddress": onion }),
                     )
                     .ok();
+
+                // 13a. Accept loop — proses stream masuk ke onion service kita.
+                // Tanpa loop ini, koneksi dari peer menumpuk di channel dan
+                // tidak pernah dibaca (bug utama F0 sebelumnya).
+                {
+                    let ctx_accept = ctx.clone();
+                    let handle = tor_handle.clone();
+                    let senders = tor_senders.clone();
+                    tokio::spawn(async move {
+                        tracing::info!("Tor accept loop dimulai");
+                        loop {
+                            match ctx_accept
+                                .accept_timeout(std::time::Duration::from_secs(10))
+                                .await
+                            {
+                                Some(stream) => {
+                                    let conn_id = uuid::Uuid::new_v4().to_string();
+                                    tracing::info!("Stream Tor masuk (conn {})", &conn_id[..8]);
+                                    let kind = crate::transport::ConnKind::TorInbound { conn_id };
+                                    tokio::spawn(crate::transport::handle_connection(
+                                        stream,
+                                        kind,
+                                        handle.clone(),
+                                        senders.clone(),
+                                    ));
+                                }
+                                // Timeout ATAU channel tertutup — jeda singkat
+                                // agar tidak busy-loop kalau service mati.
+                                None => {
+                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                }
+                            }
+                        }
+                    });
+                }
+
+                // 13b. Auto-reconnect ke peer yang punya onion address tersimpan
+                let known_onion_peers: Vec<(String, String)> = {
+                    let db = tor_db.lock().await;
+                    crate::store::get_all_peers(&db)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|p| !p.onion_address.is_empty())
+                        .map(|p| (p.node_id, p.onion_address))
+                        .collect()
+                };
+                for (node_id, onion) in known_onion_peers {
+                    tracing::info!("Auto-reconnect via Tor ke {}...", &node_id[..8.min(node_id.len())]);
+                    tokio::spawn(crate::transport::connect_to_tor_peer(
+                        ctx.clone(),
+                        onion,
+                        Some(node_id),
+                        tor_handle.clone(),
+                        tor_senders.clone(),
+                    ));
+                }
             }
             Ok(Err(e)) => {
                 tracing::warn!("Tor bootstrap gagal: {}", e);
+                *tor_ctx.lock().await = crate::tor::TorState::Failed(e.clone());
                 tor_handle
                     .emit(
                         "tor_status",
@@ -244,14 +328,13 @@ pub async fn complete_initialize(
                     .ok();
             }
             Err(_) => {
+                let msg = "Timeout: koneksi Tor diblokir firewall atau jaringan tidak mendukung";
                 tracing::warn!("Tor bootstrap timeout (180 detik) — kemungkinan firewall memblokir");
+                *tor_ctx.lock().await = crate::tor::TorState::Failed(msg.to_string());
                 tor_handle
                     .emit(
                         "tor_status",
-                        serde_json::json!({
-                            "status": "failed",
-                            "error": "Timeout: koneksi Tor diblokir firewall atau jaringan tidak mendukung"
-                        }),
+                        serde_json::json!({ "status": "failed", "error": msg }),
                     )
                     .ok();
             }
