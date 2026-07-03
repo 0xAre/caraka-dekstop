@@ -1980,6 +1980,10 @@ async function loadMessageHistory(peerId) {
     // BUG #6 FIX: perbaiki parameter name — Rust expects peer_id (JS: peerId)
     const messages = await ipc('get_messages', { peerId: peerId, limit: 100 });
     if (messages && messages.length > 0) {
+      // Backend mengembalikan dari yang terbaru ke terlama (DESC).
+      // Kita perlu reverse agar yang terlama di atas, terbaru di bawah.
+      messages.reverse();
+      
       state.messages.set(peerId, messages.map(m => ({
         text:      m.text || m.plaintext,
         timestamp: m.timestamp,

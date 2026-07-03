@@ -614,38 +614,30 @@ pub async fn get_messages(
             aad[4] = TTL_MAX;
             aad[5..13].copy_from_slice(&msg_packet_id_arr);
 
-            let start_counter = stored_counter.saturating_sub(5);
-            let end_counter = stored_counter + 100;
-
-            for counter in start_counter..end_counter {
+            // Coba decrypt dengan counter dari 0 sampai stored_counter + 10
+            // Juga brute-force TTL (1 sampai 4) karena TTL pesan bisa berkurang jika di-relay.
+            let end_counter = stored_counter + 10;
+            
+            'decrypt_loop: for counter in 0..end_counter {
                 let aead_key = if is_outgoing {
-                    crate::keys::derive_dm_key(
-                        &shared,
-                        &my_pub_for_derive,
-                        &peer_pub,
-                        &session_id,
-                        counter,
-                    )
+                    crate::keys::derive_dm_key(&shared, &my_pub_for_derive, &peer_pub, &session_id, counter)
                 } else {
-                    crate::keys::derive_dm_key(
-                        &shared,
-                        &peer_pub,
-                        &my_pub_for_derive,
-                        &session_id,
-                        counter,
-                    )
+                    crate::keys::derive_dm_key(&shared, &peer_pub, &my_pub_for_derive, &session_id, counter)
                 };
 
                 let nonce_w = crate::crypto::Nonce(nonce_arr);
 
-                if let Ok(plain_bytes) =
-                    crate::crypto::decrypt(&aead_key, &nonce_w, &msg.ciphertext, &tag_arr, &aad)
-                {
-                    if let Ok(inner) =
-                        serde_json::from_slice::<crate::packet::DmInnerPayload>(&plain_bytes)
+                for ttl_guess in 1..=TTL_MAX {
+                    aad[4] = ttl_guess;
+                    if let Ok(plain_bytes) =
+                        crate::crypto::decrypt(&aead_key, &nonce_w, &msg.ciphertext, &tag_arr, &aad)
                     {
-                        decrypted_text = Some((inner.text, inner.timestamp as i64));
-                        break;
+                        if let Ok(inner) =
+                            serde_json::from_slice::<crate::packet::DmInnerPayload>(&plain_bytes)
+                        {
+                            decrypted_text = Some((inner.text, inner.timestamp as i64));
+                            break 'decrypt_loop;
+                        }
                     }
                 }
             }
