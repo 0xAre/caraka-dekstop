@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/tauri.schema.json",
   "productName": "CARAKA Desktop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "identifier": "com.caraka.desktop",
   "build": {
     "beforeDevCommand": "npx --yes serve src -l 1420",
@@ -29,7 +29,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -39,21 +39,15 @@
     ],
     "windows": {
       "nsis": {
-        "displayLanguageSelector": true,
-        "installMode": "currentUser"
+        "displayLanguageSelector": false,
+        "installMode": "currentUser",
+        "languages": ["English"]
       }
     }
   },
   "plugins": {
     "shell": {
       "open": true
-    },
-    "updater": {
-      "endpoints": [
-        "https://github.com/0xAre/caraka-dekstop/releases/latest/download/latest.json"
-      ],
-      "dialog": true,
-      "pubkey": ""
     }
   }
 }

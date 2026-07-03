@@ -41,9 +41,15 @@ async fn main() {
 
     tracing::info!("CARAKA Desktop dimulai...");
 
+    // rustls butuh process-level CryptoProvider sebelum handshake TLS pertama
+    // (bootstrap Tor). Tanpa ini rustls panic di dalam task tokio dan Tor
+    // terlihat stuck di "bootstrapping" tanpa error.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("gagal install rustls CryptoProvider (ring)");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let app_handle = app.handle().clone();
 
@@ -93,6 +99,7 @@ async fn main() {
             // ─── Tor / Invite (F0 + F6) ───────────────────────────────
             commands::get_onion_address,
             commands::get_tor_status,
+            commands::connect_via_tor,
             commands::generate_invite_code,
             commands::parse_invite_code,
             // ─── File Transfer (F2) ───────────────────────────────────

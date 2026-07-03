@@ -1,6 +1,6 @@
 [package]
 name = "caraka-desktop"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Secure Offline Mesh Communication Powered by Lightweight Cryptography"
 authors = ["CARAKA Team"]
@@ -64,13 +64,14 @@ tor-hsservice = "0.43.0"         # OnionServiceConfigBuilder, handle_rend_reques
 tor-cell      = "0.43.0"         # Connected (untuk StreamRequest::accept)
 safelog       = "0.8"            # DisplayRedacted untuk ambil string .onion dari HsId
 futures       = "0.3"            # StreamExt di accept loop
-# rustls CryptoProvider harus dipasang sebelum bootstrap Tor
-rustls        = { version = "0.23", features = ["ring"] }
+# rustls CryptoProvider harus dipasang sebelum bootstrap Tor (lihat main.rs).
+# default-features=false agar aws-lc-rs tidak ikut — dua provider aktif tanpa
+# install_default() membuat rustls panic saat handshake TLS pertama.
+rustls        = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 
 # ── TAURI ───────────────────────────────────────────────────
 tauri              = { version = "2", features = [] }
 tauri-plugin-shell   = "2"
-tauri-plugin-updater = "2"
 
 [dev-dependencies]
 criterion   = { version = "0.5", features = ["html_reports"] }

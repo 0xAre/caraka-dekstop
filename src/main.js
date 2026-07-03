@@ -310,6 +310,48 @@ function updateUptime() {
 // Update uptime setiap 10 detik
 setInterval(updateUptime, 10000);
 
+// ── Tor Status Polling ─────────────────────────────────────────────────────
+// Poll get_tor_status setiap 10 detik, update chip + onion card di home
+
+async function pollTorStatus() {
+  const chipText = document.getElementById('tor-status-text');
+  const chipIcon = document.getElementById('tor-status-icon');
+  const onionCard = document.getElementById('card-onion');
+  const onionAddr = document.getElementById('card-onion-addr');
+  if (!chipText) return;
+
+  try {
+    const s = await ipc('get_tor_status');
+    if (s.status === 'ready') {
+      chipText.textContent = 'Online';
+      if (chipIcon) {
+        chipIcon.style.background = 'linear-gradient(135deg,#34d399,#059669)';
+        chipIcon.textContent = '🧅';
+      }
+      if (s.onionAddress && s.onionAddress !== state.onionAddress) {
+        state.onionAddress = s.onionAddress;
+        if (onionAddr) onionAddr.textContent = s.onionAddress;
+        if (onionCard) onionCard.style.display = '';
+        // Update juga di modal jika terbuka
+        const modalOnion = document.getElementById('my-onion-in-modal');
+        if (modalOnion) modalOnion.textContent = s.onionAddress;
+      }
+    } else if (s.status === 'bootstrapping') {
+      chipText.textContent = 'Bootstrapping...';
+      if (chipIcon) chipIcon.style.background = 'linear-gradient(135deg,#f59e0b,#d97706)';
+    } else if (s.status === 'failed') {
+      chipText.textContent = 'Gagal';
+      if (chipIcon) chipIcon.style.background = 'linear-gradient(135deg,#ef4444,#dc2626)';
+    }
+    // status 'unavailable' = vault belum unlock, skip
+  } catch (_) {}
+}
+
+// Poll setiap 10 detik
+setInterval(pollTorStatus, 10000);
+
+
+
 let radarAnimFrame = null;
 let radarAngle = 0;
 
@@ -1047,13 +1089,18 @@ async function setupEventListeners() {
 
   // Peer mulai connecting
   await on('peer_connecting', (event) => {
-    const { ip } = event.payload;
-    state.peers.forEach((peer, nodeId) => {
-      if (peer.ip === ip) setPeerStatus(nodeId, 'connecting');
-    });
+    const { ip, nodeId: connectingNodeId } = event.payload;
+    // Update via nodeId langsung (Tor outbound) atau cari via IP (LAN)
+    if (connectingNodeId && state.peers.has(connectingNodeId)) {
+      setPeerStatus(connectingNodeId, 'connecting');
+    } else {
+      state.peers.forEach((peer, nodeId) => {
+        if (peer.ip === ip) setPeerStatus(nodeId, 'connecting');
+      });
+    }
   });
 
-  // Peer handshake selesai
+  // Peer handshake selesai — juga set status connected
   await on('peer_handshaked', (event) => {
     const d = event.payload;
     if (!state.peers.has(d.nodeId)) {
@@ -1062,14 +1109,20 @@ async function setupEventListeners() {
         displayName: d.displayName || `Node ${d.nodeId.substring(0, 8)}`,
         ip:          d.ip,
         port:        d.port || 7771,
-        status:      'discovered',
+        status:      'connected',   // handshake = sudah terhubung
         fingerprint: d.fingerprint || '',
       });
     } else {
       const p = state.peers.get(d.nodeId);
       if (d.displayName) p.displayName = d.displayName;
       if (d.fingerprint) p.fingerprint = d.fingerprint;
+      p.status = 'connected';       // update status ke connected
       state.peers.set(d.nodeId, p);
+    }
+    // Jika peer ini sedang aktif di chat, update badge
+    updateChatConnectionBadge(d.nodeId);
+    if (state.activePeerId === d.nodeId) {
+      document.getElementById('send-btn').disabled = false;
     }
     renderPeerList();
   });
@@ -1078,6 +1131,17 @@ async function setupEventListeners() {
   await on('peer_connected', (event) => {
     const d = event.payload;
     const nodeId = d.nodeId || findPeerByIp(d.ip);
+    // Jika peer belum ada di state (Tor inbound baru), buat entry sementara
+    if (nodeId && !state.peers.has(nodeId)) {
+      state.peers.set(nodeId, {
+        nodeId,
+        displayName: `Node ${nodeId.substring(0, 8)}`,
+        ip:          d.ip || 'tor',
+        port:        d.port || 9999,
+        status:      'connected',
+        fingerprint: '',
+      });
+    }
     if (state.activeConnTimeout) { clearTimeout(state.activeConnTimeout); state.activeConnTimeout = null; }
     if (nodeId) {
       setPeerStatus(nodeId, 'connected');
@@ -1180,6 +1244,7 @@ async function handleIncomingPacket(d) {
       nonceHex:     d.nonce,
       ciphertextHex: d.ciphertext,
       aeadTagHex:   d.aeadTag,
+      ttl:          d.ttl ?? null,   // TTL aktual dari paket untuk AAD yang benar
     });
 
     if (result && result.plaintext) {
@@ -1543,28 +1608,140 @@ function setupUIInteractions() {
   });
   document.getElementById('save-settings').addEventListener('click', saveSettings);
 
-  // Add Peer Manual
-  document.getElementById('add-peer-btn').addEventListener('click', () => {
+  // ── Add Peer Modal (LAN / Tor tabs) ───────────────────────────────────────
+
+  // State tab aktif
+  let addPeerActiveTab = 'lan';
+
+  function openAddPeerModal() {
     document.getElementById('modal-add-peer').classList.remove('hidden');
-  });
+    // Default tab: LAN
+    switchAddPeerTab('lan');
+  }
+
+  function switchAddPeerTab(tab) {
+    addPeerActiveTab = tab;
+    const lanBtn  = document.getElementById('tab-lan-btn');
+    const torBtn  = document.getElementById('tab-tor-btn');
+    const lanBody = document.getElementById('tab-lan-content');
+    const torBody = document.getElementById('tab-tor-content');
+    const confirmBtn = document.getElementById('confirm-add-peer');
+
+    if (tab === 'lan') {
+      lanBtn.style.background  = 'var(--accent)';
+      lanBtn.style.color       = '#fff';
+      lanBtn.style.border      = '1.5px solid var(--accent)';
+      torBtn.style.background  = 'transparent';
+      torBtn.style.color       = 'var(--text-secondary)';
+      torBtn.style.border      = '1.5px solid var(--border)';
+      lanBody.style.display    = '';
+      torBody.style.display    = 'none';
+      confirmBtn.textContent   = 'Hubungkan';
+    } else {
+      torBtn.style.background  = 'linear-gradient(135deg,#6b46c1,#553c9a)';
+      torBtn.style.color       = '#fff';
+      torBtn.style.border      = '1.5px solid #6b46c1';
+      lanBtn.style.background  = 'transparent';
+      lanBtn.style.color       = 'var(--text-secondary)';
+      lanBtn.style.border      = '1.5px solid var(--border)';
+      lanBody.style.display    = 'none';
+      torBody.style.display    = '';
+      confirmBtn.textContent   = '🧅 Hubungkan via Tor';
+      // Update Tor status & onion address saat tab dibuka
+      updateTorModalStatus();
+    }
+  }
+
+  async function updateTorModalStatus() {
+    const statusEl = document.getElementById('tor-modal-status');
+    const myOnionEl = document.getElementById('my-onion-in-modal');
+    try {
+      const s = await ipc('get_tor_status');
+      if (s.status === 'ready') {
+        statusEl.textContent = '✅ Tor siap — koneksi onion tersedia';
+        statusEl.style.background = 'rgba(0,200,100,0.10)';
+        statusEl.style.borderColor = 'rgba(0,200,100,0.3)';
+        statusEl.style.color = '#34d399';
+        if (s.onionAddress) {
+          state.onionAddress = s.onionAddress;
+          myOnionEl.textContent = s.onionAddress;
+          // Update card di home juga
+          const cardEl = document.getElementById('card-onion-addr');
+          if (cardEl) cardEl.textContent = s.onionAddress;
+          document.getElementById('card-onion')?.style.removeProperty('display');
+        }
+      } else if (s.status === 'bootstrapping') {
+        statusEl.textContent = '⏳ Tor sedang bootstrapping... (30-60 detik pertama kali)';
+        statusEl.style.background = 'rgba(107,70,193,0.12)';
+        statusEl.style.borderColor = 'rgba(107,70,193,0.3)';
+        statusEl.style.color = 'var(--text-secondary)';
+        myOnionEl.textContent = '— (menunggu Tor siap)';
+      } else if (s.status === 'failed') {
+        statusEl.textContent = `❌ Tor gagal: ${s.error || 'error tidak diketahui'}`;
+        statusEl.style.background = 'rgba(239,68,68,0.10)';
+        statusEl.style.borderColor = 'rgba(239,68,68,0.3)';
+        statusEl.style.color = '#f87171';
+        myOnionEl.textContent = '— (Tor tidak tersedia)';
+      } else {
+        statusEl.textContent = '— Vault belum di-unlock';
+        myOnionEl.textContent = '—';
+      }
+    } catch(e) {
+      statusEl.textContent = '❓ Status tidak diketahui: ' + e;
+    }
+  }
+
+  document.getElementById('add-peer-btn').addEventListener('click', openAddPeerModal);
+
+  document.getElementById('tab-lan-btn').addEventListener('click', () => switchAddPeerTab('lan'));
+  document.getElementById('tab-tor-btn').addEventListener('click', () => switchAddPeerTab('tor'));
+
   document.getElementById('close-add-peer-modal').addEventListener('click', () => {
     document.getElementById('modal-add-peer').classList.add('hidden');
   });
   document.getElementById('cancel-add-peer').addEventListener('click', () => {
     document.getElementById('modal-add-peer').classList.add('hidden');
   });
+
+  // Klik onion address sendiri → salin
+  document.getElementById('my-onion-in-modal')?.addEventListener('click', () => {
+    const addr = state.onionAddress;
+    if (addr && addr !== '—') copyText(addr, 'Onion address disalin!');
+  });
+
   document.getElementById('confirm-add-peer').addEventListener('click', async () => {
-    const ip   = document.getElementById('peer-ip-input').value.trim();
-    const port = parseInt(document.getElementById('peer-port-input').value) || 7771;
-
-    if (!ip) { showToast('IP tidak boleh kosong', 'error'); return; }
-
-    try {
-      await ipc('add_peer_manual', { ip, port });
-      document.getElementById('modal-add-peer').classList.add('hidden');
-      showToast(`Menghubungkan ke ${ip}:${port}...`, 'info');
-    } catch (err) {
-      showToast('Gagal: ' + err, 'error');
+    if (addPeerActiveTab === 'lan') {
+      // ── LAN connect ──────────────────────────────────────────
+      const ip   = document.getElementById('peer-ip-input').value.trim();
+      const port = parseInt(document.getElementById('peer-port-input').value) || 7771;
+      if (!ip) { showToast('IP tidak boleh kosong', 'error'); return; }
+      try {
+        await ipc('add_peer_manual', { ip, port });
+        document.getElementById('modal-add-peer').classList.add('hidden');
+        showToast(`Menghubungkan ke ${ip}:${port}...`, 'info');
+      } catch (err) {
+        showToast('Gagal: ' + err, 'error');
+      }
+    } else {
+      // ── Tor connect ──────────────────────────────────────────
+      const onion = document.getElementById('peer-onion-input').value.trim().toLowerCase();
+      if (!onion) { showToast('Masukkan onion address peer', 'error'); return; }
+      if (!onion.endsWith('.onion')) { showToast('Alamat harus berakhiran .onion', 'error'); return; }
+      const btn = document.getElementById('confirm-add-peer');
+      btn.disabled = true;
+      btn.textContent = '🧅 Menghubungkan...';
+      try {
+        await ipc('connect_via_tor', { onionAddress: onion, nodeId: null });
+        document.getElementById('modal-add-peer').classList.add('hidden');
+        document.getElementById('peer-onion-input').value = '';
+        showToast(`Menghubungkan ke ${onion.substring(0,16)}... via Tor`, 'info');
+        pushNotif('tor', '🧅', `Koneksi Tor ke <strong>${onion.substring(0,16)}...</strong> dimulai`);
+      } catch (err) {
+        showToast('Koneksi Tor gagal: ' + err, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '🧅 Hubungkan via Tor';
+      }
     }
   });
 
@@ -2285,7 +2462,11 @@ function setupInviteModal() {
         await ipc('add_peer_manual', { ip: info.ip, port: info.port });
         showToast(`Menghubungkan ke ${info.ip}:${info.port}…`, 'info');
       } else {
-        showToast('Koneksi via Tor belum didukung di versi ini', 'warning');
+        const msg = await ipc('connect_via_tor', {
+          onionAddress: info.onionAddress,
+          nodeId: info.nodeId,
+        });
+        showToast(`🧅 ${msg} Dial bisa butuh 1-2 menit.`, 'info', 8000);
       }
       closeModal();
     } catch (e) {
