@@ -54,6 +54,9 @@ pub struct PeerRecord {
     pub ip_address: String,
     /// TCP port peer
     pub tcp_port: u16,
+    /// Alamat .onion peer (kosong jika belum pernah terhubung via Tor)
+    #[serde(default)]
+    pub onion_address: String,
     /// Trust score saat ini
     pub trust_score: f64,
 }
@@ -99,12 +102,13 @@ fn create_tables(conn: &Connection) -> Result<(), StoreError> {
 
         -- Tabel peer yang dikenal
         CREATE TABLE IF NOT EXISTS peers (
-            node_id      TEXT PRIMARY KEY,
-            display_name TEXT NOT NULL DEFAULT 'Unknown',
-            last_seen    INTEGER NOT NULL DEFAULT 0,
-            ip_address   TEXT NOT NULL DEFAULT '',
-            tcp_port     INTEGER NOT NULL DEFAULT 7771,
-            trust_score  REAL NOT NULL DEFAULT 2.0
+            node_id       TEXT PRIMARY KEY,
+            display_name  TEXT NOT NULL DEFAULT 'Unknown',
+            last_seen     INTEGER NOT NULL DEFAULT 0,
+            ip_address    TEXT NOT NULL DEFAULT '',
+            tcp_port      INTEGER NOT NULL DEFAULT 7771,
+            onion_address TEXT NOT NULL DEFAULT '',
+            trust_score   REAL NOT NULL DEFAULT 2.0
         );
 
         -- Tabel kunci lokal (private key identity)
@@ -143,6 +147,25 @@ fn create_tables(conn: &Connection) -> Result<(), StoreError> {
         CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient_id);
         CREATE INDEX IF NOT EXISTS idx_messages_received ON messages(received_at DESC);
     ")?;
+
+    migrate_schema(conn)?;
+    Ok(())
+}
+
+/// Migrasi schema untuk database yang dibuat versi lama.
+fn migrate_schema(conn: &Connection) -> Result<(), StoreError> {
+    // v0.2.x → v0.3: kolom onion_address di tabel peers (F0 Tor transport)
+    let has_onion: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('peers') WHERE name = 'onion_address'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_onion == 0 {
+        conn.execute(
+            "ALTER TABLE peers ADD COLUMN onion_address TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -293,15 +316,22 @@ pub fn mark_synced_to_peer(
 // ─── Peer Operations ───────────────────────────────────────────────────────
 
 /// Simpan atau update informasi peer.
+///
+/// ip_address dan onion_address yang kosong TIDAK menimpa nilai lama —
+/// peer yang sama bisa dikenal via LAN (beacon) sekaligus via Tor (invite),
+/// dan kedua alamat harus tetap tersimpan.
 pub fn upsert_peer(conn: &Connection, peer: &PeerRecord) -> Result<(), StoreError> {
     conn.execute(
-        "INSERT INTO peers (node_id, display_name, last_seen, ip_address, tcp_port, trust_score)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO peers (node_id, display_name, last_seen, ip_address, tcp_port, onion_address, trust_score)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(node_id) DO UPDATE SET
              display_name = excluded.display_name,
              last_seen = excluded.last_seen,
-             ip_address = excluded.ip_address,
+             ip_address = CASE WHEN excluded.ip_address = ''
+                               THEN peers.ip_address ELSE excluded.ip_address END,
              tcp_port = excluded.tcp_port,
+             onion_address = CASE WHEN excluded.onion_address = ''
+                                  THEN peers.onion_address ELSE excluded.onion_address END,
              trust_score = excluded.trust_score",
         params![
             peer.node_id,
@@ -309,6 +339,7 @@ pub fn upsert_peer(conn: &Connection, peer: &PeerRecord) -> Result<(), StoreErro
             peer.last_seen,
             peer.ip_address,
             peer.tcp_port as i64,
+            peer.onion_address,
             peer.trust_score,
         ],
     )?;
@@ -318,7 +349,7 @@ pub fn upsert_peer(conn: &Connection, peer: &PeerRecord) -> Result<(), StoreErro
 /// Ambil semua peer yang dikenal.
 pub fn get_all_peers(conn: &Connection) -> Result<Vec<PeerRecord>, StoreError> {
     let mut stmt = conn.prepare(
-        "SELECT node_id, display_name, last_seen, ip_address, tcp_port, trust_score
+        "SELECT node_id, display_name, last_seen, ip_address, tcp_port, onion_address, trust_score
          FROM peers
          ORDER BY last_seen DESC"
     )?;
@@ -331,7 +362,8 @@ pub fn get_all_peers(conn: &Connection) -> Result<Vec<PeerRecord>, StoreError> {
                 last_seen: row.get(2)?,
                 ip_address: row.get(3)?,
                 tcp_port: row.get::<_, i64>(4)? as u16,
-                trust_score: row.get(5)?,
+                onion_address: row.get(5)?,
+                trust_score: row.get(6)?,
             })
         })?
         .flatten()
@@ -343,7 +375,7 @@ pub fn get_all_peers(conn: &Connection) -> Result<Vec<PeerRecord>, StoreError> {
 /// Ambil peer berdasarkan node ID.
 pub fn get_peer(conn: &Connection, node_id: &str) -> Result<Option<PeerRecord>, StoreError> {
     let mut stmt = conn.prepare(
-        "SELECT node_id, display_name, last_seen, ip_address, tcp_port, trust_score
+        "SELECT node_id, display_name, last_seen, ip_address, tcp_port, onion_address, trust_score
          FROM peers WHERE node_id = ?1"
     )?;
 
@@ -355,7 +387,8 @@ pub fn get_peer(conn: &Connection, node_id: &str) -> Result<Option<PeerRecord>, 
                 last_seen: row.get(2)?,
                 ip_address: row.get(3)?,
                 tcp_port: row.get::<_, i64>(4)? as u16,
-                trust_score: row.get(5)?,
+                onion_address: row.get(5)?,
+                trust_score: row.get(6)?,
             })
         })?
         .flatten()
@@ -597,6 +630,7 @@ mod tests {
             last_seen: 1000,
             ip_address: "192.168.1.10".to_string(),
             tcp_port: 7771,
+            onion_address: String::new(),
             trust_score: 2.0,
         };
 
@@ -610,13 +644,26 @@ mod tests {
         let updated = PeerRecord {
             display_name: "Alice Updated".to_string(),
             last_seen: 2000,
-            ..peer
+            ..peer.clone()
         };
         upsert_peer(&conn, &updated).unwrap();
 
         let re2 = get_peer(&conn, "node_abc").unwrap().unwrap();
         assert_eq!(re2.display_name, "Alice Updated");
         assert_eq!(re2.last_seen, 2000);
+
+        // Upsert via Tor: onion terisi, ip kosong TIDAK menimpa ip lama
+        let via_tor = PeerRecord {
+            ip_address: String::new(),
+            onion_address: "abcdef.onion".to_string(),
+            last_seen: 3000,
+            ..peer
+        };
+        upsert_peer(&conn, &via_tor).unwrap();
+
+        let re3 = get_peer(&conn, "node_abc").unwrap().unwrap();
+        assert_eq!(re3.onion_address, "abcdef.onion");
+        assert_eq!(re3.ip_address, "192.168.1.10", "ip LAN tidak boleh tertimpa string kosong");
     }
 
     #[test]

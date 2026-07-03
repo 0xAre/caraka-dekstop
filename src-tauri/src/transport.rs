@@ -1,17 +1,18 @@
 // src-tauri/src/transport.rs
-// Fase 4 — TCP Transport Layer
+// Fase 4 — Transport Layer (TCP LAN + Tor onion stream)
 //
 // Protokol framing:
 //   [2 byte LE length] [data bytes]
 //
-// Setiap TCP connection dijaga sebagai background task.
-// Ketika paket masuk, diproses melalui Router.
+// Setiap koneksi (TcpStream ataupun arti DataStream) dijaga sebagai
+// background task lewat handle_connection yang generic atas
+// AsyncRead + AsyncWrite. Ketika paket masuk, diproses melalui Router.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tauri::{Manager, Emitter};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn, debug, error};
@@ -20,9 +21,59 @@ use crate::packet::{ClampPacket, PacketType};
 use crate::routing::RoutingDecision;
 use crate::keys::NodePublicKey;
 
+/// Port TCP default — bisa di-override via env var CARAKA_TCP_PORT untuk multi-instance testing.
 pub const DATA_PORT: u16 = 7771;
+
+pub fn effective_data_port() -> u16 {
+    std::env::var("CARAKA_TCP_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DATA_PORT)
+}
 /// Maksimum ukuran paket yang diterima (64 KB)
 const MAX_PACKET_SIZE: usize = 65535;
+
+// ─── Connection Kind ───────────────────────────────────────────────────────
+
+/// Asal koneksi — menentukan key sementara di peer_senders, isi event
+/// frontend, dan alamat yang disimpan ke tabel peers setelah Hello.
+#[derive(Clone, Debug)]
+pub enum ConnKind {
+    /// Koneksi TCP LAN biasa.
+    Lan { addr: SocketAddr },
+    /// Dial keluar ke onion peer — alamat onion tujuan diketahui.
+    TorOutbound { onion: String },
+    /// Stream masuk ke onion service kita — identitas peer anonim
+    /// sampai Hello diterima.
+    TorInbound { conn_id: String },
+}
+
+impl ConnKind {
+    /// Key sementara di peer_senders sebelum node_id dari Hello diketahui.
+    pub fn pre_hello_key(&self) -> String {
+        match self {
+            ConnKind::Lan { addr } => addr.to_string(),
+            ConnKind::TorOutbound { onion } => format!("tor:{onion}"),
+            ConnKind::TorInbound { conn_id } => format!("tor-in:{conn_id}"),
+        }
+    }
+
+    /// Representasi host untuk event frontend (field "ip").
+    pub fn display_host(&self) -> String {
+        match self {
+            ConnKind::Lan { addr } => addr.ip().to_string(),
+            ConnKind::TorOutbound { onion } => onion.clone(),
+            ConnKind::TorInbound { .. } => "tor".to_string(),
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        match self {
+            ConnKind::Lan { addr } => addr.port(),
+            _ => crate::tor::TOR_VIRTUAL_PORT,
+        }
+    }
+}
 
 // ─── Connection Manager ────────────────────────────────────────────────────
 
@@ -37,13 +88,14 @@ pub async fn start_tcp_server(
     app_handle: tauri::AppHandle,
     peer_senders: PeerSenders,
 ) {
-    let bind_addr = format!("0.0.0.0:{}", DATA_PORT);
+    let port = effective_data_port();
+    let bind_addr = format!("0.0.0.0:{}", port);
     info!("TCP server dimulai di {}", bind_addr);
 
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(l) => l,
         Err(e) => {
-            error!("Gagal bind TCP port {}: {}", DATA_PORT, e);
+            error!("Gagal bind TCP port {}: {}", port, e);
             return;
         }
     };
@@ -55,7 +107,7 @@ pub async fn start_tcp_server(
                 let handle = app_handle.clone();
                 let senders = peer_senders.clone();
                 tokio::spawn(async move {
-                    handle_inbound_connection(stream, addr, handle, senders).await;
+                    handle_connection(stream, ConnKind::Lan { addr }, handle, senders).await;
                 });
             }
             Err(e) => {
@@ -66,20 +118,22 @@ pub async fn start_tcp_server(
     }
 }
 
-/// Handle koneksi masuk dari peer.
-async fn handle_inbound_connection(
-    mut stream: TcpStream,
-    addr: SocketAddr,
+/// Handle satu koneksi peer — generic atas transport (TCP LAN / Tor stream).
+pub async fn handle_connection<S>(
+    mut stream: S,
+    kind: ConnKind,
     app_handle: tauri::AppHandle,
     peer_senders: PeerSenders,
-) {
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     // Buat channel untuk mengirim data ke peer ini
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
-    let peer_key = addr.to_string();
+    let peer_key = kind.pre_hello_key();
 
     // Tunggu Hello packet untuk identifikasi node
     let peer_node_id = {
-        match recv_packet(&mut stream).await {
+        match recv_packet_from_reader(&mut stream).await {
             Ok(raw) => {
                 match ClampPacket::decode(&raw) {
                     Ok(pkt) if pkt.header.packet_type == PacketType::Hello => {
@@ -103,7 +157,7 @@ async fn handle_inbound_connection(
                 }
             }
             Err(_) => {
-                warn!("Koneksi dari {} ditutup sebelum Hello", addr);
+                warn!("Koneksi dari {} ditutup sebelum Hello", peer_key);
                 return;
             }
         }
@@ -116,29 +170,19 @@ async fn handle_inbound_connection(
     }
 
     // Kirim Hello kita sebagai balasan
-    {
-        use crate::state::AppState;
-        if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
-            if let Ok(state) = state_arc.try_lock() {
-                if let Ok(node_bytes) = hex::decode(&state.node_id_hex) {
-                    if let Ok(arr) = node_bytes.try_into() {
-                        let hello = ClampPacket::build_hello(&arr, &state.display_name);
-                        let _ = send_raw_packet(&mut stream, &hello.encode()).await;
-                    }
-                }
-            }
-        }
+    if let Some(hello) = build_my_hello(&app_handle).await {
+        let _ = send_raw_packet(&mut stream, &hello.encode()).await;
     }
 
     // Notify frontend peer connected
     app_handle.emit("peer_connected", serde_json::json!({
         "nodeId": peer_node_id,
-        "ip": addr.ip().to_string(),
-        "port": addr.port()
+        "ip": kind.display_host(),
+        "port": kind.port()
     })).ok();
 
     // Split stream untuk read dan write secara concurrent
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(reader);
 
     // Spawn writer task
@@ -157,10 +201,10 @@ async fn handle_inbound_connection(
     loop {
         match recv_packet_from_reader(&mut reader).await {
             Ok(raw) => {
-                process_incoming_packet(raw, &peer_node_id, &app_handle, &peer_senders).await;
+                process_incoming_packet(raw, &peer_node_id, &kind, &app_handle, &peer_senders).await;
             }
             Err(e) => {
-                debug!("Koneksi dari {} terputus: {}", addr, e);
+                debug!("Koneksi dari {} terputus: {}", peer_key, e);
                 break;
             }
         }
@@ -176,7 +220,19 @@ async fn handle_inbound_connection(
         "nodeId": peer_id_for_cleanup
     })).ok();
 
-    info!("Koneksi dari {} ditutup", addr);
+    info!("Koneksi dari {} ditutup", peer_key);
+}
+
+/// Bangun Hello packet dari state kita (node_id + display_name).
+/// None jika vault belum unlock atau state belum siap.
+async fn build_my_hello(app_handle: &tauri::AppHandle) -> Option<ClampPacket> {
+    use crate::state::AppState;
+    let state_arc = app_handle.try_state::<Arc<Mutex<Option<AppState>>>>()?;
+    let state_opt = state_arc.lock().await;
+    let st = state_opt.as_ref()?;
+    let node_bytes = hex::decode(&st.node_id_hex).ok()?;
+    let arr: [u8; 32] = node_bytes.try_into().ok()?;
+    Some(ClampPacket::build_hello(&arr, &st.display_name))
 }
 
 // ─── TCP Client ────────────────────────────────────────────────────────────
@@ -239,17 +295,8 @@ pub async fn connect_to_peer(
     match connect_result {
         Ok(Ok(mut stream)) => {
             // Kirim Hello dulu
-            {
-                use crate::state::AppState;
-                if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
-                    let state = state_arc.lock().await;  // [FIX #3 style] .await bukan try_lock
-                    if let Ok(node_bytes) = hex::decode(&state.node_id_hex) {
-                        if let Ok(arr) = node_bytes.try_into() {
-                            let hello = ClampPacket::build_hello(&arr, &state.display_name);
-                            let _ = send_raw_packet(&mut stream, &hello.encode()).await;
-                        }
-                    }
-                }
+            if let Some(hello) = build_my_hello(&app_handle).await {
+                let _ = send_raw_packet(&mut stream, &hello.encode()).await;
             }
 
             // Spawn handler untuk koneksi ini
@@ -262,7 +309,7 @@ pub async fn connect_to_peer(
                     Ok(a) => a,
                     Err(_) => return,
                 };
-                handle_inbound_connection(stream, peer_addr, handle, senders).await;
+                handle_connection(stream, ConnKind::Lan { addr: peer_addr }, handle, senders).await;
             });
         }
         Ok(Err(e)) => {
@@ -284,6 +331,86 @@ pub async fn connect_to_peer(
     }
 }
 
+// ─── Tor Dial (F0) ─────────────────────────────────────────────────────────
+
+/// Dial onion peer via Tor lalu jalankan pipeline handshake yang sama
+/// dengan TCP. Retry dengan backoff — descriptor onion service baru
+/// ter-publish beberapa puluh detik setelah status "ready", jadi dial
+/// pertama sering gagal. Itu normal, bukan error fatal.
+pub async fn connect_to_tor_peer(
+    tor: Arc<crate::tor::TorContext>,
+    onion: String,
+    node_id_hint: Option<String>,
+    app_handle: tauri::AppHandle,
+    peer_senders: PeerSenders,
+) {
+    // Dedup: sudah terhubung ke node ini atau sedang dial onion yang sama
+    {
+        let senders = peer_senders.lock().await;
+        if let Some(nid) = &node_id_hint {
+            if senders.contains_key(nid) {
+                debug!("Sudah terhubung ke node {} — skip dial Tor", &nid[..8.min(nid.len())]);
+                return;
+            }
+        }
+        if senders.contains_key(&format!("tor:{onion}")) {
+            debug!("Sudah ada koneksi Tor ke {} — skip", onion);
+            return;
+        }
+    }
+
+    app_handle.emit("peer_connecting", serde_json::json!({
+        "ip": onion,
+        "port": crate::tor::TOR_VIRTUAL_PORT,
+        "nodeId": node_id_hint.clone().unwrap_or_default(),
+    })).ok();
+
+    // Jeda sebelum tiap percobaan (detik). Total ~4 percobaan dalam ±50 detik.
+    const RETRY_DELAYS: [u64; 4] = [0, 5, 15, 30];
+    let mut last_err = String::new();
+
+    for (attempt, delay) in RETRY_DELAYS.iter().enumerate() {
+        if *delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
+        }
+
+        info!("Dial Tor ke {} (percobaan {}/{})", onion, attempt + 1, RETRY_DELAYS.len());
+
+        let dial = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            tor.connect(&onion),
+        ).await;
+
+        match dial {
+            Ok(Ok(mut stream)) => {
+                info!("Terhubung ke {} via Tor", onion);
+
+                if let Some(hello) = build_my_hello(&app_handle).await {
+                    let _ = send_raw_packet(&mut stream, &hello.encode()).await;
+                }
+
+                let kind = ConnKind::TorOutbound { onion: onion.clone() };
+                tokio::spawn(handle_connection(stream, kind, app_handle, peer_senders));
+                return;
+            }
+            Ok(Err(e)) => last_err = e,
+            Err(_) => last_err = "timeout 60 detik".to_string(),
+        }
+
+        warn!("Dial Tor ke {} gagal: {}", onion, last_err);
+    }
+
+    app_handle.emit("peer_connect_failed", serde_json::json!({
+        "ip": onion,
+        "port": crate::tor::TOR_VIRTUAL_PORT,
+        "reason": format!(
+            "Gagal dial via Tor setelah {} percobaan: {}. \
+             Pastikan peer online dan Tor-nya sudah ready.",
+            RETRY_DELAYS.len(), last_err
+        ),
+    })).ok();
+}
+
 // ─── Packet I/O ────────────────────────────────────────────────────────────
 
 /// Kirim bytes dengan 2-byte length prefix framing.
@@ -301,22 +428,7 @@ pub async fn send_raw_packet<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-/// Terima satu paket dari TcpStream (blocking-style untuk non-split stream).
-pub async fn recv_packet(stream: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
-    let mut len_buf = [0u8; 2];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u16::from_le_bytes(len_buf) as usize;
-
-    if len == 0 || len > MAX_PACKET_SIZE {
-        return Err(anyhow::anyhow!("Panjang paket tidak valid: {}", len));
-    }
-
-    let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await?;
-    Ok(buf)
-}
-
-/// Terima satu paket dari BufReader.
+/// Terima satu paket dari reader mana pun (TcpStream, DataStream, BufReader).
 async fn recv_packet_from_reader<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> anyhow::Result<Vec<u8>> {
@@ -349,6 +461,7 @@ async fn recv_packet_from_reader<R: AsyncReadExt + Unpin>(
 async fn process_incoming_packet(
     raw: Vec<u8>,
     sender_key: &str,
+    kind: &ConnKind,
     app_handle: &tauri::AppHandle,
     peer_senders: &PeerSenders,
 ) {
@@ -385,39 +498,24 @@ async fn process_incoming_packet(
         debug!("Hello diterima dari node {}...", &node_id[..8.min(node_id.len())]);
 
         // Simpan peer ke database
-        save_peer_from_hello(node_id, display_name, sender_key, app_handle).await;
+        save_peer_from_hello(node_id, display_name, kind, app_handle).await;
         return;
     }
 
     // Broadcast packets — deliver ke app DAN relay, tanpa E2EE decrypt
     if pkt.header.packet_type == crate::packet::PacketType::Broadcast {
-        // Cek duplikat via router packet cache
-        let is_duplicate = {
-            use crate::state::AppState;
-            if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
-                if let Ok(state) = state_arc.try_lock() {
-                    if let Ok(router) = state.router.try_lock() {
-                        router.is_duplicate(&pkt.header.packet_id)
-                    } else { false }
-                } else { false }
-            } else { false }
-        };
+        // Cek duplikat via router packet cache, lalu register.
+        // [FIX state-type] dulu pakai try_state::<Arc<Mutex<AppState>>> yang
+        // selalu None sejak F1 — dedup broadcast tidak pernah jalan.
+        let router = crate::state::with_state(app_handle, |st| st.router.clone()).await;
 
-        if is_duplicate {
-            debug!("Duplicate broadcast packet — di-drop");
-            return;
-        }
-
-        // Register ke cache agar tidak diproses ulang
-        {
-            use crate::state::AppState;
-            if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
-                if let Ok(state) = state_arc.try_lock() {
-                    if let Ok(mut router) = state.router.try_lock() {
-                        router.register_broadcast(&pkt.header.packet_id);
-                    }
-                }
+        if let Some(router) = &router {
+            let mut r = router.lock().await;
+            if r.is_duplicate(&pkt.header.packet_id) {
+                debug!("Duplicate broadcast packet — di-drop");
+                return;
             }
+            r.register_broadcast(&pkt.header.packet_id);
         }
 
         // Parse payload (plaintext JSON)
@@ -463,14 +561,12 @@ async fn process_incoming_packet(
     };
 
     // Proses melalui router
-    use crate::state::AppState;
+    // [FIX state-type] dulu try_state dengan tipe lama → selalu None → semua
+    // paket DM masuk di-drop tanpa pernah sampai ke frontend.
     let decision = {
-        if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
-            if let Ok(state) = state_arc.try_lock() {
-                state.router.try_lock().ok().as_mut().map(|r| r.handle_incoming(&mut pkt, &source))
-            } else {
-                None
-            }
+        if let Some(router) = crate::state::with_state(app_handle, |st| st.router.clone()).await {
+            let mut r = router.lock().await;
+            Some(r.handle_incoming(&mut pkt, &source))
         } else {
             None
         }
@@ -497,9 +593,11 @@ async fn process_incoming_packet(
 /// Kirim event ke frontend (Tauri IPC) untuk menampilkan pesan.
 async fn deliver_to_app(pkt: &ClampPacket, app_handle: &tauri::AppHandle) {
     // Emit raw packet data ke frontend untuk didekripsi di commands layer
+    // TTL di-kirim karena bisa berubah saat relay — dibutuhkan untuk rekonstruksi AAD yang benar
     let payload = serde_json::json!({
         "packetId": hex::encode(pkt.header.packet_id),
         "packetType": pkt.header.packet_type as u8,
+        "ttl": pkt.header.ttl,
         "nonce": hex::encode(pkt.nonce),
         "ciphertext": hex::encode(&pkt.ciphertext),
         "aeadTag": hex::encode(pkt.aead_tag),
@@ -553,26 +651,19 @@ async fn handle_sync_req(
     app_handle: &tauri::AppHandle,
     peer_senders: &PeerSenders,
 ) {
-    use crate::state::AppState;
+    // Ambil db + node_id sekali dari state (helper aware Option<AppState>)
+    let (db_arc, my_node_id_bytes) = match crate::state::with_state(
+        app_handle,
+        |st| (st.db_conn.clone(), st.my_node_id.0),
+    ).await {
+        Some(v) => v,
+        None => return,
+    };
 
     // Kumpulkan packet_id semua pesan yang tersimpan di DB
     let msg_fingerprints: Vec<String> = {
-        if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
-            if let Ok(state) = state_arc.try_lock() {
-                if let Ok(db) = state.db_conn.try_lock() {
-                    crate::store::get_all_message_ids(&db).unwrap_or_default()
-                } else { vec![] }
-            } else { vec![] }
-        } else { vec![] }
-    };
-
-    // Buat SyncResp packet dengan fingerprint list sebagai payload JSON
-    let my_node_id_bytes: [u8; 32] = {
-        if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
-            if let Ok(state) = state_arc.try_lock() {
-                state.my_node_id.0
-            } else { [0u8; 32] }
-        } else { [0u8; 32] }
+        let db = db_arc.lock().await;
+        crate::store::get_all_message_ids(&db).unwrap_or_default()
     };
 
     let payload = serde_json::json!({ "fingerprints": msg_fingerprints }).to_string();
@@ -600,8 +691,6 @@ async fn handle_sync_req(
 
 /// Proses SyncResp: terima fingerprint list dari peer, minta data yang belum kita punya.
 async fn handle_sync_resp(pkt: &ClampPacket, app_handle: &tauri::AppHandle) {
-    use crate::state::AppState;
-
     let payload: serde_json::Value = match serde_json::from_slice(&pkt.ciphertext) {
         Ok(v) => v,
         Err(_) => return,
@@ -614,14 +703,11 @@ async fn handle_sync_resp(pkt: &ClampPacket, app_handle: &tauri::AppHandle) {
 
     // Cari fingerprints yang tidak ada di DB kita
     let missing: Vec<String> = {
-        if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
-            if let Ok(state) = state_arc.try_lock() {
-                if let Ok(db) = state.db_conn.try_lock() {
-                    let ours: std::collections::HashSet<String> =
-                        crate::store::get_all_message_ids(&db).unwrap_or_default().into_iter().collect();
-                    peer_fingerprints.into_iter().filter(|id| !ours.contains(id)).collect()
-                } else { vec![] }
-            } else { vec![] }
+        if let Some(db_arc) = crate::state::with_state(app_handle, |st| st.db_conn.clone()).await {
+            let db = db_arc.lock().await;
+            let ours: std::collections::HashSet<String> =
+                crate::store::get_all_message_ids(&db).unwrap_or_default().into_iter().collect();
+            peer_fingerprints.into_iter().filter(|id| !ours.contains(id)).collect()
         } else { vec![] }
     };
 
@@ -637,7 +723,6 @@ async fn handle_sync_resp(pkt: &ClampPacket, app_handle: &tauri::AppHandle) {
 
 /// Proses SyncData: terima pesan yang diminta, simpan ke DB.
 async fn handle_sync_data(pkt: &ClampPacket, app_handle: &tauri::AppHandle) {
-    use crate::state::AppState;
     use crate::store::StoredMessage;
 
     let msg: StoredMessage = match bincode::deserialize(&pkt.ciphertext) {
@@ -645,37 +730,41 @@ async fn handle_sync_data(pkt: &ClampPacket, app_handle: &tauri::AppHandle) {
         Err(_) => return,
     };
 
-    if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
-        if let Ok(state) = state_arc.try_lock() {
-            if let Ok(db) = state.db_conn.try_lock() {
-                let _ = crate::store::save_message(&db, &msg);
-            }
-        }
+    if let Some(db_arc) = crate::state::with_state(app_handle, |st| st.db_conn.clone()).await {
+        let db = db_arc.lock().await;
+        let _ = crate::store::save_message(&db, &msg);
     }
 
     debug!("SyncData: pesan {} disimpan dari epidemic sync", &msg.packet_id[..8.min(msg.packet_id.len())]);
 }
 
 /// Helper untuk simpan peer ke database setelah Hello.
+///
+/// Alamat yang disimpan tergantung jenis koneksi:
+///   - Lan         → ip + port asli
+///   - TorOutbound → onion address (ip dikosongkan, tidak menimpa data LAN lama)
+///   - TorInbound  → identitas jaringan anonim; hanya update nama + last_seen
 async fn save_peer_from_hello(
     node_id: &str,
     display_name: &str,
-    addr_key: &str,
+    kind: &ConnKind,
     app_handle: &tauri::AppHandle,
 ) {
-    use crate::state::AppState;
     use crate::store::PeerRecord;
 
-    let ip = addr_key.split(':').next().unwrap_or("").to_string();
-    let port: u16 = addr_key
-        .split(':')
-        .nth(1)
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(DATA_PORT);
+    let (ip, port, onion) = match kind {
+        ConnKind::Lan { addr } => (addr.ip().to_string(), addr.port(), String::new()),
+        ConnKind::TorOutbound { onion } => {
+            (String::new(), crate::tor::TOR_VIRTUAL_PORT, onion.clone())
+        }
+        ConnKind::TorInbound { .. } => {
+            (String::new(), crate::tor::TOR_VIRTUAL_PORT, String::new())
+        }
+    };
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs() as i64;
 
     let peer = PeerRecord {
@@ -684,20 +773,20 @@ async fn save_peer_from_hello(
         last_seen: now,
         ip_address: ip,
         tcp_port: port,
+        onion_address: onion,
         trust_score: 2.0,
     };
 
-    if let Some(state_arc) = app_handle.try_state::<Arc<Mutex<AppState>>>() {
-        if let Ok(state) = state_arc.try_lock() {
-            if let Ok(db) = state.db_conn.try_lock() {
-                let _ = crate::store::upsert_peer(&db, &peer);
-            }
-        }
+    if let Some(db_arc) = crate::state::with_state(app_handle, |st| st.db_conn.clone()).await {
+        let db = db_arc.lock().await;
+        let _ = crate::store::upsert_peer(&db, &peer);
     }
 
     // Notify frontend
     app_handle.emit("peer_handshaked", serde_json::json!({
         "nodeId": node_id,
         "displayName": display_name,
+        "ip": kind.display_host(),
+        "port": kind.port(),
     })).ok();
 }

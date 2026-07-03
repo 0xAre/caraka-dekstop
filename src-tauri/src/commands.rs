@@ -399,6 +399,7 @@ pub async fn try_decrypt_packet(
     nonce_hex: String,
     ciphertext_hex: String,
     aead_tag_hex: String,
+    ttl: Option<u8>,   // TTL dari paket yang diterima — penting untuk AAD yang benar
     state: SharedState<'_>,
 ) -> Result<Option<MessageInfo>, String> {
     let (db_conn, my_priv_bytes, my_node_id_arr) = {
@@ -434,7 +435,8 @@ pub async fn try_decrypt_packet(
     aad[0..2].copy_from_slice(&MAGIC);
     aad[2] = PROTOCOL_VERSION;
     aad[3] = PacketType::Dm as u8;
-    aad[4] = TTL_MAX;
+    // Gunakan TTL dari paket (bukan TTL_MAX) — TTL berkurang saat relay
+    aad[4] = ttl.unwrap_or(TTL_MAX);
     aad[5..13].copy_from_slice(&packet_id_arr);
 
     let peers = {
@@ -1076,7 +1078,7 @@ pub async fn get_onion_address(state: SharedState<'_>) -> Result<Option<String>,
     let state_opt = state.lock().await;
     let st = require_state(&state_opt)?;
     let tor = st.tor_ctx.lock().await;
-    Ok(tor.as_ref().map(|ctx| ctx.onion_address.clone()))
+    Ok(tor.context().map(|ctx| ctx.onion_address.clone()))
 }
 
 /// Kembalikan status Tor saat ini: "bootstrapping" | "ready" | "failed" | "unavailable"
@@ -1085,19 +1087,94 @@ pub async fn get_onion_address(state: SharedState<'_>) -> Result<Option<String>,
 pub async fn get_tor_status(
     state: SharedState<'_>,
 ) -> Result<serde_json::Value, String> {
+    use crate::tor::TorState;
+
     let state_opt = state.lock().await;
     if require_state(&state_opt).is_err() {
         return Ok(serde_json::json!({ "status": "unavailable" }));
     }
     let st = state_opt.as_ref().unwrap();
     let tor = st.tor_ctx.lock().await;
-    match tor.as_ref() {
-        Some(ctx) => Ok(serde_json::json!({
+    match &*tor {
+        TorState::Ready(ctx) => Ok(serde_json::json!({
             "status": "ready",
             "onionAddress": ctx.onion_address
         })),
-        None => Ok(serde_json::json!({ "status": "bootstrapping" })),
+        TorState::Failed(e) => Ok(serde_json::json!({
+            "status": "failed",
+            "error": e
+        })),
+        TorState::Bootstrapping => Ok(serde_json::json!({ "status": "bootstrapping" })),
     }
+}
+
+/// Dial peer via Tor (alamat onion dari invite code).
+///
+/// Non-blocking: dial + retry berjalan di background task. Progress
+/// dilaporkan via event peer_connecting / peer_connected / peer_connect_failed.
+#[tauri::command]
+pub async fn connect_via_tor(
+    onion_address: String,
+    node_id: Option<String>,
+    app_handle: tauri::AppHandle,
+    state: SharedState<'_>,
+) -> Result<String, String> {
+    use crate::tor::TorState;
+
+    let onion = onion_address.trim().to_lowercase();
+    if !onion.ends_with(".onion") {
+        return Err("Alamat onion tidak valid (harus berakhiran .onion)".to_string());
+    }
+
+    let (tor_ctx, peer_senders, db_conn) = {
+        let state_opt = state.lock().await;
+        let st = require_state(&state_opt)?;
+        let tor = st.tor_ctx.lock().await;
+        let ctx = match &*tor {
+            TorState::Ready(ctx) => ctx.clone(),
+            TorState::Bootstrapping => {
+                return Err("Tor masih bootstrapping — tunggu status chip jadi ready".to_string())
+            }
+            TorState::Failed(e) => return Err(format!("Tor tidak tersedia: {e}")),
+        };
+        (ctx, st.peer_senders.clone(), st.db_conn.clone())
+    };
+
+    // Simpan onion address ke DB sekarang (sebelum dial) agar bisa
+    // auto-reconnect di sesi berikutnya walaupun dial pertama gagal.
+    if let Some(nid) = &node_id {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let db = db_conn.lock().await;
+        let existing = crate::store::get_peer(&db, nid).ok().flatten();
+        let peer = crate::store::PeerRecord {
+            node_id: nid.clone(),
+            display_name: existing
+                .as_ref()
+                .map(|p| p.display_name.clone())
+                .unwrap_or_else(|| format!("Node {}", &nid[..8.min(nid.len())])),
+            last_seen: now,
+            ip_address: String::new(),
+            tcp_port: crate::tor::TOR_VIRTUAL_PORT,
+            onion_address: onion.clone(),
+            trust_score: existing.map(|p| p.trust_score).unwrap_or(1.0),
+        };
+        crate::store::upsert_peer(&db, &peer).map_err(|e| e.to_string())?;
+    }
+
+    let onion_clone = onion.clone();
+    tokio::spawn(crate::transport::connect_to_tor_peer(
+        tor_ctx,
+        onion_clone,
+        node_id,
+        app_handle,
+        peer_senders,
+    ));
+
+    Ok(format!("Mencoba dial {} via Tor…", onion))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1117,7 +1194,7 @@ pub async fn generate_invite_code(state: SharedState<'_>) -> Result<String, Stri
         let state_opt = state.lock().await;
         let st = require_state(&state_opt)?;
         let tor = st.tor_ctx.lock().await;
-        let tor_addr = tor.as_ref().map(|ctx| ctx.onion_address.clone());
+        let tor_addr = tor.context().map(|ctx| ctx.onion_address.clone());
         (st.node_id_hex.clone(), tor_addr)
     };
 
@@ -1480,22 +1557,9 @@ pub async fn try_decrypt_file_packet(
 /// Cek pembaruan tersedia via GitHub Releases.
 /// Return JSON: { available, version?, body? }
 #[tauri::command]
-pub async fn check_for_updates(app_handle: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    use tauri_plugin_updater::UpdaterExt;
-
-    let updater = app_handle
-        .updater()
-        .map_err(|e| format!("Updater tidak tersedia: {e}"))?;
-
-    match updater.check().await {
-        Ok(Some(update)) => Ok(serde_json::json!({
-            "available": true,
-            "version":   update.version,
-            "body":      update.body.unwrap_or_default()
-        })),
-        Ok(None) => Ok(serde_json::json!({ "available": false })),
-        Err(e)   => Err(format!("Gagal cek update: {e}")),
-    }
+pub async fn check_for_updates(_app_handle: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    // Updater plugin dinonaktifkan sementara untuk release testing 3 laptop
+    Ok(serde_json::json!({ "available": false }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

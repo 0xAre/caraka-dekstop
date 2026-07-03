@@ -23,6 +23,26 @@ use tor_rtcompat::PreferredRuntime;
 /// Port virtual yang digunakan saat connect ke onion peer.
 pub const TOR_VIRTUAL_PORT: u16 = 9999;
 
+/// Status transport Tor — dipegang AppState, dibaca commands + UI.
+pub enum TorState {
+    /// Bootstrap sedang berjalan (state awal).
+    Bootstrapping,
+    /// Tor siap — onion service aktif, bisa dial/accept.
+    Ready(Arc<TorContext>),
+    /// Bootstrap gagal; simpan alasan untuk ditampilkan ke user.
+    Failed(String),
+}
+
+impl TorState {
+    /// Ambil TorContext jika ready.
+    pub fn context(&self) -> Option<Arc<TorContext>> {
+        match self {
+            TorState::Ready(ctx) => Some(ctx.clone()),
+            _ => None,
+        }
+    }
+}
+
 /// Konteks Tor aktif — TorClient ter-bootstrap + onion service berjalan.
 pub struct TorContext {
     client: Arc<TorClient<PreferredRuntime>>,
