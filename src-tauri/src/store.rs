@@ -39,7 +39,15 @@ pub struct StoredMessage {
     pub received_at: i64,
     /// 1 jika sudah dikirim ke penerima, 0 jika masih pending
     pub delivered: bool,
+    /// Counter yang dipakai untuk derive_dm_key() saat pesan ini di-enkripsi.
+    /// -1 = tidak diketahui (pesan lama dari sebelum kolom ini ada) — perlu
+    /// brute-force sekali lagi saat dibaca, lalu di-self-heal via
+    /// set_message_counter() supaya baca berikutnya langsung O(1).
+    #[serde(default = "default_msg_counter")]
+    pub msg_counter: i64,
 }
+
+fn default_msg_counter() -> i64 { -1 }
 
 /// Informasi peer yang dikenal
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,7 +105,8 @@ fn create_tables(conn: &Connection) -> Result<(), StoreError> {
             ciphertext   BLOB NOT NULL,
             aead_tag     BLOB NOT NULL,
             received_at  INTEGER NOT NULL,
-            delivered    INTEGER DEFAULT 0
+            delivered    INTEGER DEFAULT 0,
+            msg_counter  INTEGER NOT NULL DEFAULT -1
         );
 
         -- Tabel peer yang dikenal
@@ -128,11 +137,15 @@ fn create_tables(conn: &Connection) -> Result<(), StoreError> {
         );
 
         -- Tabel kunci sesi (session counter per peer untuk forward secrecy)
+        -- msg_counter        = counter pesan KELUAR yang sudah kita kirim ke peer ini
+        -- recv_counter_hint  = counter pesan MASUK berikutnya yang diharapkan dari peer ini
+        --                      (dua counter ini independen — masing-masing arah punya urutannya sendiri)
         CREATE TABLE IF NOT EXISTS sessions (
-            peer_id     TEXT NOT NULL,
-            session_id  BLOB NOT NULL,
-            msg_counter INTEGER NOT NULL DEFAULT 0,
-            created_at  INTEGER NOT NULL,
+            peer_id           TEXT NOT NULL,
+            session_id        BLOB NOT NULL,
+            msg_counter       INTEGER NOT NULL DEFAULT 0,
+            recv_counter_hint INTEGER NOT NULL DEFAULT 0,
+            created_at        INTEGER NOT NULL,
             PRIMARY KEY (peer_id)
         );
 
@@ -166,6 +179,39 @@ fn migrate_schema(conn: &Connection) -> Result<(), StoreError> {
             [],
         )?;
     }
+
+    // v0.2.x → v0.3: kolom msg_counter di tabel messages — cache counter yang
+    // dipakai saat enkripsi, supaya get_messages() tidak perlu brute-force
+    // ulang setiap kali riwayat chat dibuka (lihat StoredMessage::msg_counter).
+    let has_msg_counter: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'msg_counter'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_msg_counter == 0 {
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN msg_counter INTEGER NOT NULL DEFAULT -1",
+            [],
+        )?;
+    }
+
+    // v0.2.x → v0.3: kolom recv_counter_hint di tabel sessions — lacak counter
+    // pesan MASUK secara terpisah dari msg_counter (pesan KELUAR). Sebelumnya
+    // try_decrypt_packet() salah pakai msg_counter (counter kirim kita) sebagai
+    // pusat pencarian counter pesan peer yang MASUK — dua hal yang tidak
+    // berhubungan sama sekali kecuali kebetulan.
+    let has_recv_hint: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'recv_counter_hint'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_recv_hint == 0 {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN recv_counter_hint INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -175,8 +221,8 @@ fn migrate_schema(conn: &Connection) -> Result<(), StoreError> {
 pub fn save_message(conn: &Connection, msg: &StoredMessage) -> Result<(), StoreError> {
     conn.execute(
         "INSERT OR IGNORE INTO messages
-         (id, packet_id, sender_id, recipient_id, nonce, ciphertext, aead_tag, received_at, delivered)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         (id, packet_id, sender_id, recipient_id, nonce, ciphertext, aead_tag, received_at, delivered, msg_counter)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             msg.id,
             msg.packet_id,
@@ -187,7 +233,20 @@ pub fn save_message(conn: &Connection, msg: &StoredMessage) -> Result<(), StoreE
             msg.aead_tag,
             msg.received_at,
             if msg.delivered { 1 } else { 0 },
+            msg.msg_counter,
         ],
+    )?;
+    Ok(())
+}
+
+/// Simpan counter yang berhasil dipakai untuk decrypt pesan `msg_id` (self-heal).
+///
+/// Dipanggil setelah get_messages() berhasil brute-force sebuah pesan lama
+/// (msg_counter=-1, dari sebelum migrasi) — kali berikutnya dibaca langsung O(1).
+pub fn set_message_counter(conn: &Connection, msg_id: &str, counter: u64) -> Result<(), StoreError> {
+    conn.execute(
+        "UPDATE messages SET msg_counter = ?1 WHERE id = ?2",
+        params![counter as i64, msg_id],
     )?;
     Ok(())
 }
@@ -200,7 +259,7 @@ pub fn get_messages_between(
     limit: usize,
 ) -> Result<Vec<StoredMessage>, StoreError> {
     let mut stmt = conn.prepare(
-        "SELECT id, packet_id, sender_id, recipient_id, nonce, ciphertext, aead_tag, received_at, delivered
+        "SELECT id, packet_id, sender_id, recipient_id, nonce, ciphertext, aead_tag, received_at, delivered, msg_counter
          FROM messages
          WHERE (sender_id = ?1 AND recipient_id = ?2)
             OR (sender_id = ?2 AND recipient_id = ?1)
@@ -221,6 +280,7 @@ pub fn get_messages_between(
                 aead_tag: row.get(6)?,
                 received_at: row.get(7)?,
                 delivered: row.get::<_, i32>(8)? == 1,
+                msg_counter: row.get(9)?,
             })
         },
     )?
@@ -272,7 +332,7 @@ pub fn get_messages_not_synced_to_peer(
 ) -> Result<Vec<StoredMessage>, StoreError> {
     let mut stmt = conn.prepare(
         "SELECT m.id, m.packet_id, m.sender_id, m.recipient_id,
-                m.nonce, m.ciphertext, m.aead_tag, m.received_at, m.delivered
+                m.nonce, m.ciphertext, m.aead_tag, m.received_at, m.delivered, m.msg_counter
          FROM messages m
          LEFT JOIN sync_state ss ON ss.message_id = m.id AND ss.peer_id = ?1
          WHERE ss.synced IS NULL OR ss.synced = 0
@@ -291,6 +351,7 @@ pub fn get_messages_not_synced_to_peer(
                 aead_tag: row.get(6)?,
                 received_at: row.get(7)?,
                 delivered: row.get::<_, i32>(8)? == 1,
+                msg_counter: row.get(9)?,
             })
         })?
         .flatten()
@@ -439,12 +500,32 @@ pub fn load_identity_key(
 
 // ─── Session Management ────────────────────────────────────────────────────
 
-/// Ambil atau buat session ID dan counter untuk forward secrecy.
+/// Ambil atau buat session (ID + counter KELUAR) untuk forward secrecy.
+///
+/// [FIX KRITIS] session_id sekarang DITURUNKAN DETERMINISTIK dari ECDH
+/// `shared_secret` via `keys::derive_session_id()` — BUKAN acak (OsRng) seperti
+/// sebelumnya. Dulu setiap node men-generate session_id acak secara lokal dan
+/// TIDAK PERNAH mempertukarkannya, sehingga session_id Alice != session_id Bob
+/// untuk percakapan yang sama → AEAD key selalu berbeda di kedua sisi → SEMUA
+/// pesan DM/File gagal didekripsi lawan bicara walau transport-nya berhasil
+/// (persis gejala "peer connect tapi pesan tidak sampai" di Tor maupun LAN).
+///
+/// Karena X25519 ECDH komutatif, shared_secret kedua sisi otomatis identik,
+/// sehingga session_id derivatifnya juga otomatis identik tanpa perlu
+/// pertukaran pesan tambahan.
+///
+/// Jika baris lama (dari sebelum fix ini) ditemukan dengan session_id acak
+/// yang tidak cocok dengan hasil derivasi, baris di-reset (session_id diganti,
+/// counter kembali ke 0) — riwayat pesan lama yang dienkripsi dengan
+/// session_id acak lama memang sudah tidak pernah bisa didekripsi lawan sejak
+/// awal, jadi tidak ada yang hilang.
 pub fn get_or_create_session(
     conn: &Connection,
     peer_id: &str,
+    shared_secret: &[u8; 32],
 ) -> Result<([u8; 8], u64), StoreError> {
-    // Coba load session yang ada
+    let expected_session_id = crate::keys::derive_session_id(shared_secret);
+
     let existing: Option<(Vec<u8>, i64)> = {
         let mut stmt = conn.prepare(
             "SELECT session_id, msg_counter FROM sessions WHERE peer_id = ?1"
@@ -458,17 +539,23 @@ pub fn get_or_create_session(
     };
 
     if let Some((sid_bytes, counter)) = existing {
-        let mut session_id = [0u8; 8];
+        let mut stored_session_id = [0u8; 8];
         if sid_bytes.len() == 8 {
-            session_id.copy_from_slice(&sid_bytes);
+            stored_session_id.copy_from_slice(&sid_bytes);
         }
-        return Ok((session_id, counter as u64));
-    }
 
-    // Buat session baru
-    use rand::RngCore;
-    let mut session_id = [0u8; 8];
-    rand::rngs::OsRng.fill_bytes(&mut session_id);
+        if stored_session_id == expected_session_id {
+            return Ok((expected_session_id, counter as u64));
+        }
+
+        // Baris pre-fix dengan session_id acak — reset ke nilai deterministik.
+        conn.execute(
+            "UPDATE sessions SET session_id = ?1, msg_counter = 0, recv_counter_hint = 0
+             WHERE peer_id = ?2",
+            params![expected_session_id.to_vec(), peer_id],
+        )?;
+        return Ok((expected_session_id, 0));
+    }
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -476,15 +563,15 @@ pub fn get_or_create_session(
         .as_secs() as i64;
 
     conn.execute(
-        "INSERT INTO sessions (peer_id, session_id, msg_counter, created_at)
-         VALUES (?1, ?2, 0, ?3)",
-        params![peer_id, session_id.to_vec(), now],
+        "INSERT INTO sessions (peer_id, session_id, msg_counter, recv_counter_hint, created_at)
+         VALUES (?1, ?2, 0, 0, ?3)",
+        params![peer_id, expected_session_id.to_vec(), now],
     )?;
 
-    Ok((session_id, 0))
+    Ok((expected_session_id, 0))
 }
 
-/// Increment message counter untuk session.
+/// Increment message counter KELUAR (pesan yang KITA kirim) untuk session.
 pub fn increment_msg_counter(conn: &Connection, peer_id: &str) -> Result<u64, StoreError> {
     conn.execute(
         "UPDATE sessions SET msg_counter = msg_counter + 1 WHERE peer_id = ?1",
@@ -498,6 +585,39 @@ pub fn increment_msg_counter(conn: &Connection, peer_id: &str) -> Result<u64, St
     )?;
 
     Ok(counter as u64)
+}
+
+/// Ambil hint counter pesan MASUK berikutnya yang diharapkan dari peer ini.
+///
+/// [FIX KRITIS] Sebelumnya try_decrypt_packet() salah memakai `msg_counter`
+/// (counter KELUAR — pesan yang KITA kirim ke peer) sebagai pusat jendela
+/// pencarian counter pesan MASUK dari peer. Dua nilai itu independen (masing-
+/// masing arah percakapan punya urutan counter sendiri) — pemakaian yang salah
+/// ini membuat brute-force decrypt nyaris selalu meleset kecuali kebetulan
+/// kedua sisi mengirim jumlah pesan yang mirip.
+///
+/// Baris session mungkin belum ada (peer belum pernah kirim/terima apa pun),
+/// default 0 dalam kasus itu — bukan error.
+pub fn get_recv_counter_hint(conn: &Connection, peer_id: &str) -> Result<u64, StoreError> {
+    let hint: Option<i64> = conn
+        .query_row(
+            "SELECT recv_counter_hint FROM sessions WHERE peer_id = ?1",
+            params![peer_id],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(hint.unwrap_or(0) as u64)
+}
+
+/// Majukan recv_counter_hint ke `next` — hanya maju, tidak pernah mundur
+/// (pesan bisa datang out-of-order; hint dipakai sebagai pusat jendela pencarian,
+/// bukan nilai presisi, jadi aman kalau tidak selalu tepat).
+pub fn bump_recv_counter_hint(conn: &Connection, peer_id: &str, next: u64) -> Result<(), StoreError> {
+    conn.execute(
+        "UPDATE sessions SET recv_counter_hint = MAX(recv_counter_hint, ?1) WHERE peer_id = ?2",
+        params![next as i64, peer_id],
+    )?;
+    Ok(())
 }
 
 // ─── Settings (Key-Value) ──────────────────────────────────────────────────
@@ -562,6 +682,7 @@ mod tests {
                 .unwrap()
                 .as_secs() as i64,
             delivered: false,
+            msg_counter: -1,
         }
     }
 
@@ -669,9 +790,10 @@ mod tests {
     #[test]
     fn test_session_creation() {
         let conn = open_test_db();
+        let shared = [0x11u8; 32];
 
-        let (sid1, counter1) = get_or_create_session(&conn, "peer1").unwrap();
-        let (sid2, counter2) = get_or_create_session(&conn, "peer1").unwrap();
+        let (sid1, counter1) = get_or_create_session(&conn, "peer1", &shared).unwrap();
+        let (sid2, counter2) = get_or_create_session(&conn, "peer1", &shared).unwrap();
 
         // Session yang sama harus return session_id yang sama
         assert_eq!(sid1, sid2);
@@ -680,9 +802,28 @@ mod tests {
     }
 
     #[test]
+    fn test_session_id_deterministic_from_shared_secret() {
+        let conn = open_test_db();
+        // Dua shared_secret berbeda harus menghasilkan session_id berbeda —
+        // dan yang PENTING: shared_secret yang SAMA (simulasi ECDH komutatif
+        // Alice/Bob) harus selalu menghasilkan session_id yang SAMA meski
+        // dipanggil dari "sisi" mana pun, tanpa pertukaran pesan apa pun.
+        let shared_a = [0xAAu8; 32];
+        let shared_b = [0xBBu8; 32];
+
+        let (sid_a, _) = get_or_create_session(&conn, "peerA", &shared_a).unwrap();
+        let (sid_b, _) = get_or_create_session(&conn, "peerB", &shared_b).unwrap();
+        assert_ne!(sid_a, sid_b);
+
+        let expected = crate::keys::derive_session_id(&shared_a);
+        assert_eq!(sid_a, expected);
+    }
+
+    #[test]
     fn test_message_counter_increment() {
         let conn = open_test_db();
-        get_or_create_session(&conn, "peer1").unwrap();
+        let shared = [0x22u8; 32];
+        get_or_create_session(&conn, "peer1", &shared).unwrap();
 
         let c1 = increment_msg_counter(&conn, "peer1").unwrap();
         let c2 = increment_msg_counter(&conn, "peer1").unwrap();
@@ -691,6 +832,38 @@ mod tests {
         assert_eq!(c1, 1);
         assert_eq!(c2, 2);
         assert_eq!(c3, 3);
+    }
+
+    #[test]
+    fn test_recv_counter_hint() {
+        let conn = open_test_db();
+        let shared = [0x33u8; 32];
+        get_or_create_session(&conn, "peer1", &shared).unwrap();
+
+        assert_eq!(get_recv_counter_hint(&conn, "peer1").unwrap(), 0);
+
+        bump_recv_counter_hint(&conn, "peer1", 5).unwrap();
+        assert_eq!(get_recv_counter_hint(&conn, "peer1").unwrap(), 5);
+
+        // Tidak boleh mundur meski di-bump dengan nilai lebih kecil
+        bump_recv_counter_hint(&conn, "peer1", 2).unwrap();
+        assert_eq!(get_recv_counter_hint(&conn, "peer1").unwrap(), 5);
+
+        bump_recv_counter_hint(&conn, "peer1", 9).unwrap();
+        assert_eq!(get_recv_counter_hint(&conn, "peer1").unwrap(), 9);
+    }
+
+    #[test]
+    fn test_set_message_counter_self_heal() {
+        let conn = open_test_db();
+        let msg = make_test_message("legacy1", "alice", "bob");
+        assert_eq!(msg.msg_counter, -1);
+        save_message(&conn, &msg).unwrap();
+
+        set_message_counter(&conn, "legacy1", 42).unwrap();
+
+        let retrieved = get_messages_between(&conn, "alice", "bob", 10).unwrap();
+        assert_eq!(retrieved[0].msg_counter, 42);
     }
 
     #[test]

@@ -592,12 +592,15 @@ async fn process_incoming_packet(
 
 /// Kirim event ke frontend (Tauri IPC) untuk menampilkan pesan.
 async fn deliver_to_app(pkt: &ClampPacket, app_handle: &tauri::AppHandle) {
-    // Emit raw packet data ke frontend untuk didekripsi di commands layer
-    // TTL di-kirim karena bisa berubah saat relay — dibutuhkan untuk rekonstruksi AAD yang benar
+    // Emit raw packet data ke frontend untuk didekripsi di commands layer.
+    // TIDAK menyertakan ttl — pkt.header.ttl di titik ini sudah di-decrement oleh
+    // Router::handle_incoming() (selalu, bahkan untuk pengiriman 1-hop langsung),
+    // sementara AAD DM/File di commands.rs selalu direkonstruksi dengan TTL_MAX
+    // konstan (sama seperti yang dipakai pengirim). Ttl dari wire TIDAK relevan
+    // untuk dekripsi payload — ia murni metadata routing.
     let payload = serde_json::json!({
         "packetId": hex::encode(pkt.header.packet_id),
         "packetType": pkt.header.packet_type as u8,
-        "ttl": pkt.header.ttl,
         "nonce": hex::encode(pkt.nonce),
         "ciphertext": hex::encode(&pkt.ciphertext),
         "aeadTag": hex::encode(pkt.aead_tag),

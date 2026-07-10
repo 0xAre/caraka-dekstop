@@ -1239,12 +1239,14 @@ async function handleIncomingPacket(d) {
     // BUG #2 FIX: Gunakan parameter names yang sesuai dengan Rust command signature
     // Transport emits: packetId, nonce, ciphertext, aeadTag
     // Rust expects: packet_id (packetId), nonce_hex (nonceHex), ciphertext_hex (ciphertextHex), aead_tag_hex (aeadTagHex)
+    // TTL TIDAK dikirim ke try_decrypt_packet — AAD DM selalu pakai TTL_MAX
+    // konstan di backend (lihat komentar try_decrypt_packet di commands.rs),
+    // karena router selalu men-decrement ttl sebelum sampai di sini.
     const result = await ipc('try_decrypt_packet', {
       packetId:     d.packetId,
       nonceHex:     d.nonce,
       ciphertextHex: d.ciphertext,
       aeadTagHex:   d.aeadTag,
-      ttl:          d.ttl ?? null,   // TTL aktual dari paket untuk AAD yang benar
     });
 
     if (result && result.plaintext) {

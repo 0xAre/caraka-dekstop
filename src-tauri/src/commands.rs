@@ -183,7 +183,7 @@ pub async fn init_node(
         node_id: state.node_id_hex.clone(),
         fingerprint,
         display_name: state.display_name.clone(),
-        tcp_port: crate::transport::DATA_PORT,
+        tcp_port: crate::transport::effective_data_port(),
     })
 }
 
@@ -252,15 +252,16 @@ pub async fn send_dm(
     let my_priv   = crate::keys::NodePrivateKey(my_priv_bytes);
     let my_pub    = crate::keys::NodePublicKey(my_node_id_arr);
 
-    // 2. Ambil atau buat session info
+    // 2. ECDH → shared secret (dibutuhkan untuk derive session_id deterministik)
+    let shared_secret = crate::keys::ecdh(&my_priv, &peer_id);
+
+    // 3. Ambil atau buat session info — session_id diturunkan dari shared_secret
+    // (lihat store::get_or_create_session untuk penjelasan fix sinkronisasi)
     let (session_id, msg_counter) = {
         let db = db_conn.lock().await;
-        crate::store::get_or_create_session(&db, &recipient_id)
+        crate::store::get_or_create_session(&db, &recipient_id, &shared_secret)
             .map_err(|e| e.to_string())?
     };
-
-    // 3. ECDH → shared secret
-    let shared_secret = crate::keys::ecdh(&my_priv, &peer_id);
 
     // 4. Derive DM-Key
     let aead_key = crate::keys::derive_dm_key(
@@ -349,6 +350,7 @@ pub async fn send_dm(
         aead_tag: aead_tag.to_vec(),
         received_at: now as i64,
         delivered: false,
+        msg_counter: msg_counter as i64,
     };
 
     {
@@ -399,7 +401,6 @@ pub async fn try_decrypt_packet(
     nonce_hex: String,
     ciphertext_hex: String,
     aead_tag_hex: String,
-    ttl: Option<u8>,   // TTL dari paket yang diterima — penting untuk AAD yang benar
     state: SharedState<'_>,
 ) -> Result<Option<MessageInfo>, String> {
     let (db_conn, my_priv_bytes, my_node_id_arr) = {
@@ -435,8 +436,15 @@ pub async fn try_decrypt_packet(
     aad[0..2].copy_from_slice(&MAGIC);
     aad[2] = PROTOCOL_VERSION;
     aad[3] = PacketType::Dm as u8;
-    // Gunakan TTL dari paket (bukan TTL_MAX) — TTL berkurang saat relay
-    aad[4] = ttl.unwrap_or(TTL_MAX);
+    // [FIX KRITIS] AAD WAJIB pakai TTL_MAX konstan, BUKAN ttl dari wire.
+    // send_dm() SELALU meng-encode header dengan ttl=TTL_MAX (lihat header di
+    // atas), sementara Router::handle_incoming() SELALU men-decrement ttl
+    // sebelum paket diteruskan ke deliver_to_app — bahkan untuk pengiriman
+    // langsung 1-hop. Akibatnya ttl yang diterima frontend (`clamp_packet_received`)
+    // selalu sudah ter-decrement dan TIDAK PERNAH cocok dengan AAD asli si
+    // pengirim, sehingga AEAD auth selalu gagal dan pesan live tidak pernah
+    // berhasil didekripsi walau koneksi transport (LAN/Tor) sudah benar.
+    aad[4] = TTL_MAX;
     aad[5..13].copy_from_slice(&packet_id_arr);
 
     let peers = {
@@ -450,14 +458,22 @@ pub async fn try_decrypt_packet(
                 let peer_pub = crate::keys::NodePublicKey(arr);
                 let shared = crate::keys::ecdh(&my_priv, &peer_pub);
 
-                let (session_id, stored_counter) = {
+                // session_id: deterministik dari shared_secret (lihat store::get_or_create_session).
+                // recv_hint: pusat jendela pencarian counter pesan MASUK dari peer ini —
+                // TERPISAH dari counter KELUAR kita sendiri (bug lama memakai counter
+                // keluar kita sebagai pusat pencarian counter masuk peer, yang keliru
+                // karena dua arah percakapan punya urutan counter masing-masing).
+                let (session_id, recv_hint) = {
                     let db = db_conn.lock().await;
-                    crate::store::get_or_create_session(&db, &peer.node_id)
-                        .unwrap_or(([0u8; 8], 0))
+                    let sid = crate::store::get_or_create_session(&db, &peer.node_id, &shared)
+                        .map(|(sid, _)| sid)
+                        .unwrap_or([0u8; 8]);
+                    let hint = crate::store::get_recv_counter_hint(&db, &peer.node_id).unwrap_or(0);
+                    (sid, hint)
                 };
 
-                let start = stored_counter.saturating_sub(5);
-                let end = stored_counter + 50;
+                let start = recv_hint.saturating_sub(5);
+                let end = recv_hint + 60;
 
                 for counter in start..end {
                     let aead_key = crate::keys::derive_dm_key(
@@ -509,10 +525,12 @@ pub async fn try_decrypt_packet(
                                 aead_tag: aead_tag.to_vec(),
                                 received_at: now_ts,
                                 delivered: true,
+                                msg_counter: counter as i64,
                             };
                             {
                                 let db = db_conn.lock().await;
                                 let _ = crate::store::save_message(&db, &stored_msg);
+                                let _ = crate::store::bump_recv_counter_hint(&db, &peer.node_id, counter + 1);
                             }
 
                             return Ok(Some(MessageInfo {
@@ -575,6 +593,16 @@ pub async fn get_messages(
 
     let my_pub_for_derive = crate::keys::public_key_from_private(&crate::keys::NodePrivateKey(my_priv_bytes));
 
+    // Session_id + kedua counter diambil SEKALI di luar loop (bukan per-pesan
+    // seperti sebelumnya) — nilainya sama untuk semua pesan dengan peer ini.
+    let (session_id, send_counter, recv_hint) = {
+        let db = db_conn.lock().await;
+        let (sid, send_ctr) = crate::store::get_or_create_session(&db, &peer_id, &shared)
+            .unwrap_or(([0u8; 8], 0));
+        let recv_hint = crate::store::get_recv_counter_hint(&db, &peer_id).unwrap_or(0);
+        (sid, send_ctr, recv_hint)
+    };
+
     let mut result = Vec::new();
     for msg in messages {
         let is_outgoing = msg.sender_id == node_id_hex;
@@ -585,11 +613,6 @@ pub async fn get_messages(
         ) {
             let nonce_arr: [u8; 16] = nonce_arr;
             let tag_arr: [u8; 16] = tag_arr;
-
-            let (session_id, stored_counter) = {
-                let db = db_conn.lock().await;
-                crate::store::get_or_create_session(&db, &peer_id).unwrap_or(([0u8; 8], 0))
-            };
 
             let mut decrypted_text = None;
 
@@ -611,33 +634,48 @@ pub async fn get_messages(
             aad[0..2].copy_from_slice(&MAGIC);
             aad[2] = PROTOCOL_VERSION;
             aad[3] = PacketType::Dm as u8;
+            // [FIX KRITIS] TTL_MAX konstan — lihat penjelasan panjang di
+            // try_decrypt_packet(). ttl BUKAN bagian yang boleh brute-force,
+            // ia selalu TTL_MAX di AAD asli si pengirim.
             aad[4] = TTL_MAX;
             aad[5..13].copy_from_slice(&msg_packet_id_arr);
 
-            // Coba decrypt dengan counter dari 0 sampai stored_counter + 10
-            // Juga brute-force TTL (1 sampai 4) karena TTL pesan bisa berkurang jika di-relay.
-            let end_counter = stored_counter + 10;
-            
-            'decrypt_loop: for counter in 0..end_counter {
+            let nonce_w = crate::crypto::Nonce(nonce_arr);
+
+            let try_counter = |counter: u64, aad: &[u8; crate::packet::HEADER_SIZE]| {
                 let aead_key = if is_outgoing {
                     crate::keys::derive_dm_key(&shared, &my_pub_for_derive, &peer_pub, &session_id, counter)
                 } else {
                     crate::keys::derive_dm_key(&shared, &peer_pub, &my_pub_for_derive, &session_id, counter)
                 };
+                crate::crypto::decrypt(&aead_key, &nonce_w, &msg.ciphertext, &tag_arr, aad)
+                    .ok()
+                    .and_then(|plain| serde_json::from_slice::<crate::packet::DmInnerPayload>(&plain).ok())
+            };
 
-                let nonce_w = crate::crypto::Nonce(nonce_arr);
-
-                for ttl_guess in 1..=TTL_MAX {
-                    aad[4] = ttl_guess;
-                    if let Ok(plain_bytes) =
-                        crate::crypto::decrypt(&aead_key, &nonce_w, &msg.ciphertext, &tag_arr, &aad)
-                    {
-                        if let Ok(inner) =
-                            serde_json::from_slice::<crate::packet::DmInnerPayload>(&plain_bytes)
-                        {
-                            decrypted_text = Some((inner.text, inner.timestamp as i64));
-                            break 'decrypt_loop;
-                        }
+            if msg.msg_counter >= 0 {
+                // Fast path — counter sudah diketahui persis (baik dari send_dm
+                // saat pesan ini dikirim, atau hasil self-heal brute-force
+                // sebelumnya) — SATU percobaan decrypt saja, O(1).
+                if let Some(inner) = try_counter(msg.msg_counter as u64, &aad) {
+                    decrypted_text = Some((inner.text, inner.timestamp as i64));
+                }
+            } else {
+                // Legacy fallback — pesan dari sebelum kolom msg_counter ada.
+                // Dibatasi (bukan brute-force tak terbatas seperti sebelumnya)
+                // dan hanya terjadi SEKALI per pesan lama karena hasilnya
+                // di-self-heal via set_message_counter().
+                let end_counter = if is_outgoing {
+                    send_counter + 1
+                } else {
+                    recv_hint.max(500) + 60
+                };
+                for counter in 0..end_counter {
+                    if let Some(inner) = try_counter(counter, &aad) {
+                        decrypted_text = Some((inner.text, inner.timestamp as i64));
+                        let db = db_conn.lock().await;
+                        let _ = crate::store::set_message_counter(&db, &msg.id, counter);
+                        break;
                     }
                 }
             }
@@ -723,7 +761,7 @@ pub async fn add_peer_manual(
     app_handle: tauri::AppHandle,
     state: SharedState<'_>,
 ) -> Result<String, String> {
-    let port = port.unwrap_or(crate::transport::DATA_PORT);
+    let port = port.unwrap_or(crate::transport::effective_data_port());
 
     if ip.trim().is_empty() {
         return Err("IP address tidak boleh kosong".to_string());
@@ -1038,7 +1076,7 @@ pub async fn scan_emergency_network(
         st.peer_senders.clone()
     };
 
-    let found_ips = hotspot::scan_hotspot_subnet(crate::transport::DATA_PORT, 300).await;
+    let found_ips = hotspot::scan_hotspot_subnet(crate::transport::effective_data_port(), 300).await;
 
     for ip in &found_ips {
         let ip_clone = ip.clone();
@@ -1048,7 +1086,7 @@ pub async fn scan_emergency_network(
         tokio::spawn(async move {
             crate::transport::connect_to_peer(
                 &ip_clone,
-                crate::transport::DATA_PORT,
+                crate::transport::effective_data_port(),
                 None,
                 handle,
                 senders,
@@ -1205,7 +1243,7 @@ pub async fn generate_invite_code(state: SharedState<'_>) -> Result<String, Stri
             "caraka0:{}:{}:{}",
             node_id,
             local_ip,
-            crate::transport::DATA_PORT
+            crate::transport::effective_data_port()
         )
     };
 
@@ -1228,7 +1266,7 @@ pub async fn parse_invite_code(code: String) -> Result<serde_json::Value, String
         ["caraka0", node_id, ip, port] => Ok(serde_json::json!({
             "nodeId":  node_id,
             "ip":      ip,
-            "port":    port.parse::<u16>().unwrap_or(crate::transport::DATA_PORT),
+            "port":    port.parse::<u16>().unwrap_or(crate::transport::effective_data_port()),
             "via":     "lan"
         })),
         ["caraka1", node_id, onion, port] => Ok(serde_json::json!({
@@ -1284,15 +1322,17 @@ pub async fn send_file(
     let my_priv = crate::keys::NodePrivateKey(my_priv_bytes);
     let my_node_id = crate::keys::NodePublicKey(my_node_id_arr);
 
-    // 3. Session + counter
+    // 3. ECDH → shared secret (dibutuhkan untuk derive session_id deterministik)
+    let shared_secret = crate::keys::ecdh(&my_priv, &peer_id);
+
+    // 4. Session + counter — session_id diturunkan dari shared_secret
     let (session_id, msg_counter) = {
         let db = db_conn.lock().await;
-        crate::store::get_or_create_session(&db, &recipient_id)
+        crate::store::get_or_create_session(&db, &recipient_id, &shared_secret)
             .map_err(|e| e.to_string())?
     };
 
-    // 4. ECDH → shared secret → AEAD key
-    let shared_secret = crate::keys::ecdh(&my_priv, &peer_id);
+    // 5. AEAD key
     let aead_key = crate::keys::derive_dm_key(
         &shared_secret,
         &my_node_id,
@@ -1465,13 +1505,19 @@ pub async fn try_decrypt_file_packet(
                 let peer_pub = crate::keys::NodePublicKey(arr);
                 let shared = crate::keys::ecdh(&my_priv, &peer_pub);
 
-                let (session_id, stored_counter) = {
+                // session_id deterministik dari shared_secret; recv_hint (BUKAN
+                // counter kirim kita) sebagai pusat jendela pencarian counter
+                // MASUK — sama seperti fix di try_decrypt_packet().
+                let (session_id, recv_hint) = {
                     let db = db_conn.lock().await;
-                    crate::store::get_or_create_session(&db, &peer.node_id)
-                        .unwrap_or(([0u8; 8], 0))
+                    let sid = crate::store::get_or_create_session(&db, &peer.node_id, &shared)
+                        .map(|(sid, _)| sid)
+                        .unwrap_or([0u8; 8]);
+                    let hint = crate::store::get_recv_counter_hint(&db, &peer.node_id).unwrap_or(0);
+                    (sid, hint)
                 };
 
-                for counter in stored_counter.saturating_sub(5)..stored_counter + 50 {
+                for counter in recv_hint.saturating_sub(5)..recv_hint + 60 {
                     let aead_key = crate::keys::derive_dm_key(
                         &shared,
                         &peer_pub,
@@ -1490,6 +1536,11 @@ pub async fn try_decrypt_file_packet(
                         if let Ok(fp) =
                             serde_json::from_slice::<crate::packet::FilePayload>(&plain)
                         {
+                            {
+                                let db = db_conn.lock().await;
+                                let _ = crate::store::bump_recv_counter_hint(&db, &peer.node_id, counter + 1);
+                            }
+
                             // Dekode base64 → bytes
                             let file_bytes = base64::engine::general_purpose::STANDARD
                                 .decode(&fp.file_data_b64)
@@ -1578,7 +1629,7 @@ pub async fn generate_peer_qr(
     let qr_data = serde_json::json!({
         "nodeId": node_id,
         "ip": local_ip,
-        "port": crate::transport::DATA_PORT,
+        "port": crate::transport::effective_data_port(),
         "app": "CARAKA"
     })
     .to_string();

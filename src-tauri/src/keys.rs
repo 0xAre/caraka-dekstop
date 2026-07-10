@@ -165,6 +165,25 @@ pub fn derive_dm_key(
     AeadKey(key_bytes)
 }
 
+/// Turunkan session_id (8 byte) secara DETERMINISTIK dari ECDH shared_secret.
+///
+/// [FIX KRITIS] Sebelumnya session_id di-generate acak (OsRng) secara LOKAL oleh
+/// masing-masing node dan TIDAK PERNAH dipertukarkan lewat wire protocol.
+/// Akibatnya session_id Alice != session_id Bob untuk percakapan yang sama,
+/// sehingga derive_dm_key() menghasilkan AEAD key yang berbeda di kedua sisi —
+/// SEMUA pesan DM/File gagal didekripsi oleh lawan bicara (LAN maupun Tor),
+/// walaupun koneksi transport-nya sendiri berhasil.
+///
+/// X25519 ECDH bersifat komutatif: shared_secret_Alice == shared_secret_Bob.
+/// Dengan menurunkan session_id dari shared_secret (bukan acak), kedua node
+/// independen SELALU mendapat session_id yang identik tanpa perlu pertukaran
+/// pesan tambahan.
+pub fn derive_session_id(shared_secret: &[u8; 32]) -> [u8; 8] {
+    let mut id = [0u8; 8];
+    crate::crypto::xof_derive(shared_secret, b"CARAKA-SESSION-ID-v1", &mut id);
+    id
+}
+
 /// Alias untuk derive_dm_key dengan parameter is_sender untuk clarity di commands.rs.
 ///
 /// Ketika is_sender=true: sender=my_id, receiver=peer_id  (Alice kirim ke Bob)
@@ -379,15 +398,24 @@ mod tests {
 
     #[test]
     fn test_full_e2e_pipeline() {
-        // Simulasi: Alice kirim DM ke Bob, Bob dekripsi
+        // Simulasi: Alice kirim DM ke Bob, Bob dekripsi.
+        //
+        // [REGRESSION TEST] session_id SENGAJA diturunkan SECARA TERPISAH oleh
+        // Alice dan Bob dari shared_secret masing-masing (BUKAN dibagi lewat
+        // variabel yang sama seperti sebelumnya) — ini mensimulasikan dua node
+        // independen yang tidak pernah bertukar session_id lewat wire protocol.
+        // Sebelum fix derive_session_id() ada, kedua sisi men-generate
+        // session_id ACAK secara lokal sehingga TIDAK PERNAH cocok, dan test
+        // lama (memakai satu variabel session_id yang dipakai bersama) tidak
+        // pernah menangkap bug ini karena secara tidak sengaja "curang".
         let (alice_priv, alice_pub) = generate_keypair();
         let (bob_priv, bob_pub)     = generate_keypair();
-        let session_id = [0xABu8; 8];
         let msg_counter = 0u64;
         let message = b"Halo Bob! Ini pesan terenkripsi dari Alice via CARAKA.";
 
-        // 1. Alice: ECDH + derive send key
+        // 1. Alice: ECDH + derive session_id + send key (semua dari sisi Alice)
         let shared_alice = ecdh(&alice_priv, &bob_pub);
+        let session_id = derive_session_id(&shared_alice);
         let alice_send_key = derive_dm_key(
             &shared_alice, &alice_pub, &bob_pub, &session_id, msg_counter
         );
@@ -399,10 +427,18 @@ mod tests {
             &alice_send_key, &nonce, message, aad
         ).expect("Alice enkripsi harus berhasil");
 
-        // 3. Bob: ECDH + derive recv key
+        // 3. Bob: ECDH + derive session_id SENDIRI (independen dari Alice) + recv key.
+        // X25519 komutatif → shared_bob == shared_alice → session_id_bob HARUS
+        // == session_id yang dipakai Alice tanpa pertukaran pesan apa pun.
         let shared_bob = ecdh(&bob_priv, &alice_pub);
+        let session_id_bob = derive_session_id(&shared_bob);
+        assert_eq!(
+            session_id_bob, session_id,
+            "session_id Bob harus identik dengan Alice tanpa pertukaran wire — \
+             kalau ini gagal, semua DM antar node independen tidak akan pernah terdekripsi"
+        );
         let bob_recv_key = derive_dm_key(
-            &shared_bob, &alice_pub, &bob_pub, &session_id, msg_counter
+            &shared_bob, &alice_pub, &bob_pub, &session_id_bob, msg_counter
         );
 
         // 4. Bob: Dekripsi
