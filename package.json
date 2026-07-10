@@ -3,9 +3,9 @@
   "version": "0.2.2",
   "private": true,
   "scripts": {
-    "tauri": "tauri",
-    "dev": "tauri dev",
-    "build": "tauri build"
+    "tauri": "npx tauri",
+    "dev": "npx tauri dev",
+    "build": "npx tauri build"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"
